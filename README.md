@@ -32,21 +32,48 @@ ssh -L 7788:localhost:7788 devbox    # then open http://localhost:7788
 
 Nothing phones home. Nothing needs a package registry at install time.
 
-## Status
+## Quickstart
 
-Early. **M1 (collector + Claude Code adapter) is in progress.** See `PROTOCOL.md` for the
-wire format and the repo plan for the milestone list.
-
-## The collector has zero dependencies
-
-By hard requirement — enforced in CI against a bare interpreter with empty site-packages:
+No install, no dependencies, no internet:
 
 ```bash
-python3 -m agentview.collector --once
+git clone <this repo> && cd agentview
+python3 -m agentview.hub
 ```
 
-That is what makes it deployable to a restricted box by copying a directory. The hub,
-tests and tooling have real dependencies and run in the devcontainer.
+The hub prints a URL with an auth token — open it. It collects from the machine it runs
+on automatically. To report a *different* machine or container into the same HUD:
+
+```bash
+python3 -m agentview.collector --hub http://<hub-host>:7788 --token <token> \
+    --parent <hub-machine-context-id>      # so it nests under its host
+```
+
+## Status
+
+**M1 (collector + Claude Code adapter) and M2 (hub + overview UI) work.** Next is M3,
+terminal attach. See `PROTOCOL.md` for the wire format.
+
+Supported today: Claude Code (rich adapter), plus any tool that writes a heartbeat file
+to `~/.agentview/agents/*.json` — the documented integration path for a harness
+agentview has never seen. Generic tmux/process discovery lands in M5.
+
+## Zero dependencies, by hard requirement
+
+**Both the collector and the hub** are stdlib-only — enforced in CI against a bare
+interpreter with empty site-packages:
+
+```bash
+python3 -S -E -m agentview.collector --once     # no site-packages at all
+python3 -S -E -m unittest discover -s tests -t .
+```
+
+That is what makes agentview deployable to a restricted box by copying a directory.
+There is no build step, no package registry, and nothing for a security team to review
+beyond a loopback socket.
+
+Linters and pytest do have dependencies; those run in the devcontainer, never on your
+host.
 
 ## License
 

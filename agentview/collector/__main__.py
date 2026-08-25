@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="context id of the host running this container, so the UI can nest it",
     )
     parser.add_argument("--indent", type=int, default=None, help="pretty-print JSON")
+    parser.add_argument(
+        "--hub", default=None, help="push snapshots to this hub, e.g. http://localhost:7788"
+    )
+    parser.add_argument("--token", default=None, help="hub auth token")
+    parser.add_argument("--quiet", action="store_true", help="do not print snapshots")
     return parser
 
 
@@ -74,11 +79,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit(collect(ctx=ctx, config_dir=args.config_dir), args.format, args.indent)
         return 0
 
-    # Streaming to a hub arrives in M2; until then --interval just re-renders so the
-    # discovery loop can be watched working.
+    client = None
+    if args.hub:
+        from agentview.collector.transport import HubClient
+
+        client = HubClient(args.hub, token=args.token)
+        try:
+            client.hello(ctx.to_dict())
+            print("connected to hub at {}".format(args.hub), file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - retry on the next tick instead
+            print("hub not reachable yet ({}); will keep trying".format(exc), file=sys.stderr)
+
     try:
         while True:
-            emit(collect(ctx=ctx, config_dir=args.config_dir), args.format, args.indent)
+            snapshot = collect(ctx=ctx, config_dir=args.config_dir)
+            if client:
+                try:
+                    client.push(snapshot.to_dict())
+                except Exception as exc:  # noqa: BLE001 - a hub blip must not kill us
+                    print("push failed: {}".format(exc), file=sys.stderr)
+            if not args.quiet:
+                emit(snapshot, args.format, args.indent)
             time.sleep(max(0.5, args.interval))
     except KeyboardInterrupt:
         return 130

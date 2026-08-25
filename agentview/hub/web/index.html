@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentview</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128065;</text></svg>">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <h1>agentview</h1>
+  </div>
+  <div class="totals" id="totals"></div>
+  <div class="conn" id="conn"><span class="conn-dot"></span><span id="conn-text">connecting</span></div>
+</header>
+
+<main id="root">
+  <div class="empty" id="boot">Loading…</div>
+</main>
+
+<footer class="footer">
+  <span id="footer-note">Presence is read from each harness on disk. Detail view attaches to the agent's own terminal — coming in M3.</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

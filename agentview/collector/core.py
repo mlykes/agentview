@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 from agentview.collector import context as context_mod
 from agentview.collector.adapters.base import Adapter
 from agentview.collector.adapters.claude_code import ClaudeCodeAdapter
+from agentview.collector.adapters.heartbeat import HeartbeatAdapter
 from agentview.model import AgentRecord, ContextRef, Snapshot
 
 #: Fields a lower-priority adapter is allowed to fill in when a higher-priority one
@@ -25,7 +26,7 @@ def default_adapters(config_dir: Optional[Path] = None) -> List[Adapter]:
     M5 adds the generic tmux/process/heartbeat adapters here; the merge below
     already handles them.
     """
-    return [ClaudeCodeAdapter(config_dir=config_dir)]
+    return [ClaudeCodeAdapter(config_dir=config_dir), HeartbeatAdapter()]
 
 
 def merge(groups: List[List[AgentRecord]]) -> List[AgentRecord]:
