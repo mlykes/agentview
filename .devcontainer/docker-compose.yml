@@ -1,0 +1,13 @@
+services:
+  dev:
+    environment:
+      # Marks this as a devcontainer so the collector's context detection reports
+      # kind=container rather than host. Useful for exercising M4 nesting locally.
+      - DEVCONTAINER=1
+      - AGENTVIEW_LABEL=agentview dev
+    # NOTE: deliberately does NOT mount ~/.claude from the host.
+    # Mounting it would make a collector inside this container report the *host's*
+    # agents while claiming to be a container -- exactly the confusion M4 is meant
+    # to resolve. A container collector should only ever see its own agents.
+    volumes:
+      - .:/workspace:cached

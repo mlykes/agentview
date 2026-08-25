@@ -1,0 +1,19 @@
+{
+  "name": "agentview",
+  "dockerComposeFile": ["../docker-compose.yml", "docker-compose.yml"],
+  "service": "dev",
+  "workspaceFolder": "/workspace",
+  "overrideCommand": true,
+  "remoteUser": "root",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.analysis.extraPaths": ["/workspace"],
+        "[python]": { "editor.defaultFormatter": "charliermarsh.ruff" }
+      },
+      "extensions": ["ms-python.python", "charliermarsh.ruff"]
+    }
+  },
+  "postCreateCommand": "cd /workspace && pip install -e '.[dev]'"
+}

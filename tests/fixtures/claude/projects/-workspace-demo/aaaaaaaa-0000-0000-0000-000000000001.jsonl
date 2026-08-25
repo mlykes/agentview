@@ -1,0 +1,3 @@
+{"type":"agent-setting","sessionId":"aaaaaaaa-0000-0000-0000-000000000001"}
+{"type":"user","cwd":"/workspace","gitBranch":"feature/request-layer","version":"2.1.241"}
+{"type":"assistant","cwd":"/workspace","gitBranch":"feature/request-layer","version":"2.1.241"}

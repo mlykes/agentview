@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentview"
+version = "0.1.0"
+description = "A local HUD for watching coding agents run across machines, containers and harnesses"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+# NOTE: the collector is deliberately stdlib-only and has NO dependencies.
+# It must run on a bare interpreter with an empty site-packages -- that is what
+# makes it deployable to a locked-down box by copying a directory.
+# Everything below is for the hub and for development only.
+dependencies = []
+
+[project.optional-dependencies]
+hub = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+dev = [
+    "agentview[hub]",
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+agentview = "agentview.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentview*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,24 @@
+# Everything with dependencies runs here, never on the host.
+# The collector is deliberately absent: it must run natively to see host processes,
+# and needs no dependencies to do so.
+services:
+  dev:
+    image: python:3.12-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:cached
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+    command: sleep infinity
+
+  hub:
+    image: python:3.12-slim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:cached
+    ports:
+      # Loopback only. The hub is reached from a laptop via `ssh -L`, never by
+      # binding a routable interface.
+      - "127.0.0.1:7788:7788"
+    command: >
+      sh -c "pip install -e '.[hub]' && python -m agentview.hub --host 0.0.0.0 --port 7788"

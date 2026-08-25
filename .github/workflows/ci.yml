@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The load-bearing test. If this fails, the collector has grown a dependency
+  # and can no longer be deployed to a locked-down box by copying a directory.
+  collector-is-dependency-free:
+    runs-on: ubuntu-latest
+    container: python:3.9-slim
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove site-packages is empty
+        run: |
+          python -c "import sys, site; print(sys.version)"
+          pip list --format=freeze | grep -v -E '^(pip|setuptools|wheel)' && exit 1 || true
+      - name: Collector runs with no site-packages at all
+        run: python -S -E -m agentview.collector --once
+      - name: Test suite runs on a bare interpreter
+        run: python -S -E -m unittest discover -s tests -t .
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[dev]'
+      - run: ruff check agentview tests
+      - run: pytest -q
