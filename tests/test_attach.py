@@ -69,6 +69,51 @@ class ResolveAttachTest(unittest.TestCase):
         self.assertEqual(params, ["agent_id"])
 
 
+class ReadWriteResolutionTest(unittest.TestCase):
+    """Read-only is a property of the tmux client, so switching modes means
+    replacing the session with the read-write argv."""
+
+    def setUp(self):
+        registry = Registry()
+        ro_rw = {
+            "id": "h1:x:both", "name": "both", "status": "idle", "context_id": "h1",
+            "attach": {"available": True, "argv": ["tmux", "attach", "-r", "-t", "s"],
+                       "argv_readwrite": ["tmux", "attach", "-t", "s"], "reason": None},
+        }
+        ro_only = {
+            "id": "h1:x:ro", "name": "ro", "status": "idle", "context_id": "h1",
+            "attach": {"available": True, "argv": ["tmux", "attach", "-r", "-t", "s"],
+                       "argv_readwrite": None, "reason": None},
+        }
+        registry.ingest(snapshot("h1", [ro_rw, ro_only]))
+        self.state = HubState(registry, token=None, local_context_id="h1")
+
+    def test_readwrite_argv_drops_the_read_only_flag(self):
+        argv, error = self.state.resolve_attach_rw("h1:x:both")
+        self.assertIsNone(error)
+        self.assertNotIn("-r", argv)
+
+    def test_default_argv_keeps_it(self):
+        argv, _ = self.state.resolve_attach("h1:x:both")
+        self.assertIn("-r", argv)
+
+    def test_agent_without_a_readwrite_argv_is_refused(self):
+        argv, error = self.state.resolve_attach_rw("h1:x:ro")
+        self.assertIsNone(argv)
+        self.assertIn("cannot accept input", error)
+
+    def test_readwrite_still_refuses_a_remote_agent(self):
+        registry = Registry()
+        registry.ingest(snapshot("h2", [{
+            "id": "h2:x:r", "name": "r", "status": "idle", "context_id": "h2",
+            "attach": {"available": True, "argv": ["tmux"], "argv_readwrite": ["tmux"],
+                       "reason": None},
+        }]))
+        state = HubState(registry, token=None, local_context_id="h1")
+        _, error = state.resolve_attach_rw("h2:x:r")
+        self.assertIn("another machine", error)
+
+
 class PtySessionTest(unittest.TestCase):
     def test_captures_output_and_exits(self):
         session = PtySession("t", ["sh", "-c", "echo hello-from-pty"])

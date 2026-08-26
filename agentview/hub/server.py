@@ -99,6 +99,19 @@ class HubState:
             return None, "no attach command reported"
         return argv, None
 
+    def resolve_attach_rw(self, agent_id: str):
+        """The read-write attach argv, for when a viewer explicitly enables input."""
+        agent = self.registry.find_agent(agent_id)
+        if agent is None:
+            return None, "no such agent"
+        argv, error = self.resolve_attach(agent_id)
+        if error:
+            return None, error
+        rw = (agent.get("attach") or {}).get("argv_readwrite")
+        if not rw or not isinstance(rw, list):
+            return None, "this agent cannot accept input"
+        return rw, None
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "agentview"
@@ -164,7 +177,7 @@ class Handler(BaseHTTPRequestHandler):
             # Paint with real data on first frame instead of flashing "Loading...".
             # Only for an authorized request: an unauthenticated / must not carry
             # session data, which is the whole reason /v1/* is gated.
-            return self._index(authorized=self._authorized(query))
+            return self._index(self._authorized(query), query)
         if path.startswith("/static/"):
             name = path[len("/static/"):]
             # One optional "vendor/" segment; everything else is rejected rather
@@ -222,12 +235,32 @@ class Handler(BaseHTTPRequestHandler):
             session = self.state.ptys.get(agent_id)
 
             if action == "input":
-                if not self.state.allow_input:
-                    return self._json(403, {"error": "input disabled (--read-only)"})
                 if session is None:
                     return self._json(404, {"error": "no live terminal"})
+                # Terminal protocol replies (DA, OSC colour queries, cursor reports)
+                # arrive on this path too, and tmux waits on them before painting.
+                # They must go through even in read-only mode -- what makes read-only
+                # safe is that the session itself runs `tmux attach -r`, which
+                # discards keystrokes server-side. Client-side filtering would be
+                # both weaker and broken.
                 session.write(str(payload.get("d", "")).encode("utf-8"))
                 return self._json(200, {"ok": True})
+
+            if action == "mode":
+                want_input = bool(payload.get("input"))
+                if want_input and not self.state.allow_input:
+                    return self._json(403, {"error": "input disabled on this hub (--read-only)"})
+                if want_input:
+                    argv, error = self.state.resolve_attach_rw(agent_id)
+                else:
+                    argv, error = self.state.resolve_attach(agent_id)
+                if error:
+                    return self._json(409, {"error": error})
+                # Read-only is a property of the tmux client, so changing it means
+                # replacing the session. The browser reopens its stream after this.
+                self.state.ptys.close(agent_id)
+                self.state.ptys.get_or_start(agent_id, argv, 120, 32)
+                return self._json(200, {"ok": True, "input": want_input})
 
             if action == "resize":
                 if session is None:
@@ -302,19 +335,47 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(text.encode("utf-8"))
         self.wfile.flush()
 
-    def _index(self, authorized: bool):
+    def _index(self, authorized: bool, query=None):
         try:
             html = (WEB_ROOT / "index.html").read_text()
         except OSError:
             return self._json(404, {"error": "not found"})
-        if authorized:
-            payload = json.dumps(self.state.registry.view(), default=str)
-            # A non-executable data block; app.js reads it. Inert under CSP.
-            tag = '<script type="application/json" id="bootstrap">{}</script>'.format(
-                payload.replace("<", "\\u003c")
-            )
-            html = html.replace("<!--BOOTSTRAP-->", tag)
+        if not authorized:
+            return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+
+        blocks = [self._data_block("bootstrap", self.state.registry.view())]
+
+        # For a ?open=<agent id> deep link, hand over the terminal's current screen
+        # as well, so it paints immediately instead of sitting blank until the agent
+        # next writes something. Same reasoning as the HUD bootstrap above.
+        agent_id = (query or {}).get("open", [None])[0]
+        if agent_id:
+            argv, error = self.state.resolve_attach(agent_id)
+            if not error:
+                try:
+                    session = self.state.ptys.get_or_start(agent_id, argv, 120, 32)
+                    # A session started just now has nothing to replay yet. Give it a
+                    # brief, bounded moment to paint -- tmux redraws immediately on
+                    # attach -- so the deep link opens on content rather than black.
+                    deadline = time.time() + 0.6
+                    while not session.scrollback() and time.time() < deadline:
+                        time.sleep(0.02)
+                    blocks.append(self._data_block("term-bootstrap", {
+                        "agent_id": agent_id,
+                        "data": base64.b64encode(session.scrollback()).decode("ascii"),
+                    }))
+                except Exception:  # noqa: BLE001 - the SSE stream will retry anyway
+                    pass
+
+        html = html.replace("<!--BOOTSTRAP-->", "\n".join(blocks))
         return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    @staticmethod
+    def _data_block(element_id, payload):
+        """A non-executable JSON block the page reads. Inert under CSP; escaping "<"
+        stops a payload from breaking out of the script element."""
+        text = json.dumps(payload, default=str).replace("<", "\\u003c")
+        return '<script type="application/json" id="{}">{}</script>'.format(element_id, text)
 
     def _file(self, path: Path):
         try:

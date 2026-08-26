@@ -88,9 +88,23 @@ and remote agents alike.
 
 | Context | argv |
 |---|---|
-| local | `tmux attach -r -t agentview:<id>` |
-| container | `docker exec -it <cid> tmux attach -r -t agentview:<id>` |
-| remote | `ssh <host> -t tmux attach -r -t agentview:<id>` |
+| local | `tmux attach -r -t <session>` |
+| container | `docker exec -it <cid> tmux attach -r -t <session>` |
+| remote | `ssh <host> -t tmux attach -r -t <session>` |
+
+**The hub reads argv from the registry, never from the request.** A client-supplied
+command would be arbitrary execution behind a loopback port. `resolve_attach()` takes
+an agent id and nothing else.
+
+**Read-only is enforced by `tmux attach -r`, server-side** — not by the browser
+declining to send keystrokes. Terminal protocol replies (DA, OSC colour queries,
+cursor reports) travel the same path as keystrokes and tmux waits on them before it
+will paint, so filtering client-side would be both weaker and visibly broken.
+Switching modes replaces the tmux client, since read-only is a property of that
+client; the browser reopens its stream afterwards.
+
+Only agents in the hub's own context can be attached to today. The argv is written for
+the collector's machine, so running a remote one locally would attach to the wrong box.
 
 You cannot attach to the PTY of a process started outside a multiplexer. Agents launched
 normally still appear (presence is the point of the HUD) with `available: false` and an
@@ -114,18 +128,35 @@ genuinely idle one. A failing adapter produces a warning, never a crash.
 
 | Endpoint | Direction | Purpose |
 |---|---|---|
-| `POST /v1/hello` | collector → hub | Announce context, receive a collector id |
-| `WS /v1/stream` | collector → hub | `agents.snapshot` every 5s; `agents.delta` and `timeline.event` immediately |
-| `WS /v1/attach/{agent_id}` | browser ⇄ hub ⇄ collector | PTY bytes |
-| `GET /v1/agents` | client → hub | REST snapshot for TUI / `curl \| jq` |
+| `POST /v1/hello` | collector → hub | Announce context |
+| `POST /v1/snapshot` | collector → hub | Push a Snapshot; replaces that context's view |
+| `GET /v1/view` | client → hub | Nested view: contexts, children, totals |
+| `GET /v1/agents` | client → hub | Flat snapshot for a TUI or `curl \| jq` |
+| `GET /v1/attach/{id}/stream` | browser → hub | **SSE** stream of terminal output |
+| `POST /v1/attach/{id}/input` | browser → hub | Bytes toward the PTY |
+| `POST /v1/attach/{id}/resize` | browser → hub | `{"cols": n, "rows": n}` |
+| `POST /v1/attach/{id}/mode` | browser → hub | `{"input": bool}` — swap read-only/read-write |
+| `POST /v1/attach/{id}/close` | browser → hub | Tear the session down |
+| `GET /v1/health` | anyone | Liveness; the only unauthenticated `/v1` route |
 
-Attach frames:
+**SSE, not WebSocket.** It keeps the hub stdlib-only (no hand-rolled RFC6455 framing),
+survives SSH tunnels and proxies unchanged, and a terminal view is overwhelmingly
+read-heavy. Output frames are base64, because terminal output is arbitrary bytes and
+SSE framing is line-oriented:
 
-```json
-{"t": "i", "d": "ls\r"}                 // input  (browser → PTY)
-{"t": "o", "d": "total 0\r\n"}          // output (PTY → browser)
-{"t": "r", "cols": 120, "rows": 40}     // resize
 ```
+data: WzIxNF0gdGhpbmtpbmcuLi4NCg==
+
+: ping
+```
+
+An `event: end` frame means the PTY exited; the client should stop reconnecting.
+
+**The page and its static assets are unauthenticated.** A browser cannot attach an
+`Authorization` header to `<script src>` or `<link rel=stylesheet>`, so gating them
+only breaks the page. They carry no session data. Auth applies to `/v1/*`, where the
+data is — via `Authorization: Bearer` or `?t=`, since `EventSource` cannot set headers
+either.
 
 ## Liveness
 

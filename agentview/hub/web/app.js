@@ -209,6 +209,16 @@
   var inputToggle = document.getElementById("term-input");
   var foot = document.getElementById("term-foot");
 
+  function b64bytes(b64) {
+    // atob() yields a binary string, which would mangle multi-byte UTF-8 -- and
+    // agent TUIs are made of box-drawing characters. xterm.js takes a Uint8Array
+    // and decodes it itself, correctly across chunk boundaries.
+    var raw = atob(b64);
+    var bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+  }
+
   function api(path, payload) {
     return fetch(path + (token ? "?t=" + encodeURIComponent(token) : ""), {
       method: "POST",
@@ -241,12 +251,27 @@
     term.open(body);
     doFit();
 
-    // Keystrokes only leave the browser when input is explicitly enabled. Typing
-    // into a running agent by accident is a real way to derail it.
+    // Everything xterm emits is forwarded, including the protocol replies tmux
+    // waits on before it will paint. Read-only is enforced by the session running
+    // `tmux attach -r`, which discards keystrokes server-side -- a stronger
+    // guarantee than the browser choosing not to send them.
     term.onData(function (data) {
-      if (!inputToggle.checked || !current) return;
+      if (!current) return;
       api("/v1/attach/" + encodeURIComponent(current.id) + "/input", { d: data });
     });
+
+    // Paint the current screen from the server-injected block when this page was
+    // deep-linked to this agent. The SSE stream takes over from there.
+    try {
+      var seed = document.getElementById("term-bootstrap");
+      if (seed && seed.textContent) {
+        var parsed = JSON.parse(seed.textContent);
+        if (parsed.agent_id === agent.id && parsed.data) {
+          term.write(b64bytes(parsed.data));
+          streamLive = true;
+        }
+      }
+    } catch (e) { /* the stream will fill it in */ }
 
     var url = "/v1/attach/" + encodeURIComponent(agent.id) + "/stream" +
       "?cols=" + term.cols + "&rows=" + term.rows +
@@ -259,10 +284,7 @@
         // atob() yields a binary string, which would mangle any multi-byte UTF-8 --
         // and agent TUIs are full of box-drawing characters. xterm.js accepts a
         // Uint8Array and does the decoding itself, including across chunk splits.
-        var raw = atob(ev.data);
-        var bytes = new Uint8Array(raw.length);
-        for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-        term.write(bytes);
+        term.write(b64bytes(ev.data));
         if (!streamLive) { streamLive = true; setFoot(null, inputToggle.checked); }
       } catch (e) { /* skip bad frame */ }
     };
@@ -324,9 +346,48 @@
     if (e.key === "Escape" && !overlay.hidden) closeTerminal();
   });
   inputToggle.addEventListener("change", function () {
-    setFoot(null, inputToggle.checked);
-    if (inputToggle.checked && term) term.focus();
+    if (!current) return;
+    var wanted = inputToggle.checked;
+    var agent = current;
+    setFoot(wanted ? "enabling input…" : "returning to read-only…", false);
+    api("/v1/attach/" + encodeURIComponent(agent.id) + "/mode", { input: wanted })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (body) {
+            inputToggle.checked = !wanted;
+            setFoot(body.error || "could not change mode", false);
+          });
+        }
+        // The tmux client was replaced, so the old stream is stale.
+        reopenStream(agent, wanted);
+      })
+      .catch(function () {
+        inputToggle.checked = !wanted;
+        setFoot("could not change mode", false);
+      });
   });
+
+  function reopenStream(agent, inputOn) {
+    if (stream) { stream.close(); stream = null; }
+    if (term) term.reset();
+    streamLive = false;
+    var url = "/v1/attach/" + encodeURIComponent(agent.id) + "/stream" +
+      "?cols=" + (term ? term.cols : 120) + "&rows=" + (term ? term.rows : 32) +
+      (token ? "&t=" + encodeURIComponent(token) : "");
+    stream = new EventSource(url);
+    stream.onmessage = function (ev) {
+      try {
+        term.write(b64bytes(ev.data));
+        if (!streamLive) { streamLive = true; setFoot(null, inputOn); }
+      } catch (e) { /* skip bad frame */ }
+    };
+    stream.addEventListener("end", function () {
+      document.getElementById("term-dot").className = "term-dot dead";
+      setFoot("session ended", false);
+      if (stream) { stream.close(); stream = null; }
+    });
+    if (inputOn && term) term.focus();
+  }
   window.addEventListener("resize", doFit);
 
   // Render the server-injected snapshot immediately so the first frame has real
