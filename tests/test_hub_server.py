@@ -143,10 +143,18 @@ class StreamFramingTest(ServerTestBase):
             }],
             "warnings": [], "collected_at": 0,
         })
+        # The id is sent percent-encoded, exactly as a browser sends it. Agent ids
+        # contain ":", and urlparse does not decode path segments -- so sending the
+        # id raw (as curl does, and as every check here used to) passes while every
+        # real client gets "no such agent" and an empty terminal.
+        import urllib.parse
+
+        encoded = urllib.parse.quote("h1:x:s", safe="")
+        self.assertIn("%3A", encoded, "test must exercise the encoded form")
         sock = socket.create_connection(("127.0.0.1", self.httpd.server_address[1]), timeout=6)
         sock.sendall(
-            b"GET /v1/attach/h1:x:s/stream HTTP/1.1\r\nHost: x\r\n"
-            b"Authorization: Bearer " + TOKEN.encode() + b"\r\n\r\n"
+            ("GET /v1/attach/%s/stream HTTP/1.1\r\nHost: x\r\n" % encoded).encode()
+            + b"Authorization: Bearer " + TOKEN.encode() + b"\r\n\r\n"
         )
         head = b""
         while b"\r\n\r\n" not in head and len(head) < 4096:
@@ -156,9 +164,45 @@ class StreamFramingTest(ServerTestBase):
             head += chunk
         sock.close()
         text = head.decode("utf-8", "replace")
+        self.assertNotIn("no such agent", text)
         self.assertIn("HTTP/1.1 200", text)
         self.assertIn("chunked", text.lower())
         self.assertIn("text/event-stream", text.lower())
+
+
+class EncodedAgentIdTest(ServerTestBase):
+    """Agent ids contain ":" and browsers percent-encode it in a path segment."""
+
+    def test_post_routes_decode_the_id(self):
+        import urllib.parse
+
+        registry = self.__class__.httpd.RequestHandlerClass.state.registry
+        registry.ingest({
+            "context": {"id": "h1", "label": "t", "kind": "host", "platform": "linux",
+                        "arch": "x86_64", "parent_id": None},
+            "agents": [{
+                "id": "h1:x:enc", "name": "enc", "status": "idle", "context_id": "h1",
+                "attach": {"available": True, "argv": ["sh", "-c", "sleep 5"],
+                           "argv_readwrite": ["sh", "-c", "sleep 5"], "reason": None},
+            }],
+            "warnings": [], "collected_at": 0,
+        })
+        encoded = urllib.parse.quote("h1:x:enc", safe="")
+        # /mode resolves the agent through the registry, so a missed decode surfaces
+        # as "no such agent" rather than being masked by a "no live terminal" 404.
+        request = urllib.request.Request(
+            self.base + "/v1/attach/" + encoded + "/mode",
+            data=b'{"input": false}',
+            headers={"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                status, body = response.status, response.read().decode()
+        except urllib.error.HTTPError as exc:
+            status, body = exc.code, exc.read().decode()
+        self.assertNotIn("no such agent", body)
+        self.assertEqual(status, 200, body)
 
 
 class BootstrapTest(ServerTestBase):

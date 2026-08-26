@@ -27,7 +27,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from agentview.collector import context as context_mod
 from agentview.collector.core import collect
@@ -201,7 +201,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "unauthorized"})
 
         if path.startswith("/v1/attach/") and path.endswith("/stream"):
-            agent_id = path[len("/v1/attach/"):-len("/stream")]
+            # unquote: agent ids contain ":" and a browser percent-encodes it in a
+            # path segment. urlparse does not decode, so without this the lookup
+            # fails with "no such agent" for every real client -- while curl, which
+            # sends the id raw, works fine.
+            agent_id = unquote(path[len("/v1/attach/"):-len("/stream")])
             return self._attach_stream(agent_id, query)
 
         if path == "/v1/view":
@@ -238,6 +242,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/v1/attach/"):
             rest = parsed.path[len("/v1/attach/"):]
             agent_id, _, action = rest.rpartition("/")
+            agent_id = unquote(agent_id)  # see the note on the stream route
             session = self.state.ptys.get(agent_id)
 
             if action == "input":
