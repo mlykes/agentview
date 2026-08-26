@@ -115,6 +115,12 @@ class HubState:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "agentview"
+    #: HTTP/1.1 is required for the SSE stream. Under HTTP/1.0 there is no chunked
+    #: framing, so a browser cannot tell where one piece of a bodiless response ends
+    #: and buffers the whole thing instead of dispatching events -- the terminal then
+    #: sits empty forever. curl reads raw bytes and never noticed the difference.
+    #: Every non-streaming response below sends Content-Length, which 1.1 requires.
+    protocol_version = "HTTP/1.1"
     state: HubState = None  # type: ignore[assignment]
 
     # -- plumbing ---------------------------------------------------------
@@ -302,7 +308,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        self.close_connection = True
 
         sub_id = session.subscribe(send)
         try:
@@ -325,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
             pass  # viewer navigated away
         finally:
             session.unsubscribe(sub_id)
+            self._sse_end()
 
     def _sse(self, data: bytes) -> None:
         """Terminal output is arbitrary bytes; base64 keeps it safe through SSE's
@@ -332,8 +341,19 @@ class Handler(BaseHTTPRequestHandler):
         self._sse_raw("data: {}\n\n".format(base64.b64encode(data).decode("ascii")))
 
     def _sse_raw(self, text: str) -> None:
-        self.wfile.write(text.encode("utf-8"))
+        """One chunked-encoding frame per SSE payload, flushed immediately."""
+        payload = text.encode("utf-8")
+        self.wfile.write(b"%x\r\n" % len(payload))
+        self.wfile.write(payload)
+        self.wfile.write(b"\r\n")
         self.wfile.flush()
+
+    def _sse_end(self) -> None:
+        try:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def _index(self, authorized: bool, query=None):
         try:

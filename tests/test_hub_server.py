@@ -110,6 +110,57 @@ class ApiAuthTest(ServerTestBase):
         self.assertTrue(json.loads(body)["ok"])
 
 
+class StreamFramingTest(ServerTestBase):
+    """The regression that produced an empty terminal.
+
+    BaseHTTPRequestHandler defaults to HTTP/1.0, which has no chunked framing. A
+    bodiless streaming response therefore gives a browser no way to tell where one
+    piece ends, so it buffers the whole thing and dispatches no events -- while curl,
+    reading raw bytes, sees everything and looks perfectly healthy.
+    """
+
+    def test_server_speaks_http_1_1(self):
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
+        conn.request("GET", "/v1/health")
+        response = conn.getresponse()
+        self.assertEqual(response.version, 11)
+        conn.close()
+
+    def test_sse_stream_is_chunked(self):
+        import socket
+
+        # An agent whose attach argv is a trivially real command.
+        registry = self.__class__.httpd.RequestHandlerClass.state.registry
+        registry.ingest({
+            "context": {"id": "h1", "label": "t", "kind": "host", "platform": "linux",
+                        "arch": "x86_64", "parent_id": None},
+            "agents": [{
+                "id": "h1:x:s", "name": "s", "status": "idle", "context_id": "h1",
+                "attach": {"available": True, "argv": ["sh", "-c", "echo hi; sleep 5"],
+                           "argv_readwrite": None, "reason": None},
+            }],
+            "warnings": [], "collected_at": 0,
+        })
+        sock = socket.create_connection(("127.0.0.1", self.httpd.server_address[1]), timeout=6)
+        sock.sendall(
+            b"GET /v1/attach/h1:x:s/stream HTTP/1.1\r\nHost: x\r\n"
+            b"Authorization: Bearer " + TOKEN.encode() + b"\r\n\r\n"
+        )
+        head = b""
+        while b"\r\n\r\n" not in head and len(head) < 4096:
+            chunk = sock.recv(512)
+            if not chunk:
+                break
+            head += chunk
+        sock.close()
+        text = head.decode("utf-8", "replace")
+        self.assertIn("HTTP/1.1 200", text)
+        self.assertIn("chunked", text.lower())
+        self.assertIn("text/event-stream", text.lower())
+
+
 class BootstrapTest(ServerTestBase):
     """The injected first-paint payload must follow the same rule as /v1/*."""
 
