@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 def process_table() -> Dict[int, str]:
@@ -76,3 +76,87 @@ def pid_matches(pid: int, expect: str, table: Optional[Dict[int, str]] = None) -
         # is not our agent either way.
         return False
     return expect.lower() in comm.lower()
+
+
+def parent_map() -> Dict[int, int]:
+    """pid -> ppid for every visible process."""
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,ppid="], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    parents: Dict[int, int] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                parents[int(parts[0])] = int(parts[1])
+            except ValueError:
+                continue
+    return parents
+
+
+def ancestors(pid: int, parents: Optional[Dict[int, int]] = None, limit: int = 40) -> List[int]:
+    """Walk a pid's parent chain.
+
+    Used to decide whether an agent is running inside a tmux pane: the harness is
+    typically a grandchild of the pane process (pane -> shell -> agent), so a direct
+    parent check is not enough.
+    """
+    parents = parents if parents is not None else parent_map()
+    chain: List[int] = []
+    seen = set()
+    current = pid
+    for _ in range(limit):
+        parent = parents.get(current)
+        if parent is None or parent in seen or parent <= 1:
+            break
+        chain.append(parent)
+        seen.add(parent)
+        current = parent
+    return chain
+
+
+def command_table() -> Dict[int, str]:
+    """pid -> full command line.
+
+    Distinct from process_table(), which returns the executable name. A harness is
+    frequently launched through an interpreter -- `node /usr/local/bin/opencode`,
+    `python3 .../aider`, a shell script -- so the name we need to recognise appears
+    in argv, not in the executable name. Liveness still uses process_table(); this is
+    only for identification.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    table: Dict[int, str] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_str, _, args = line.partition(" ")
+        try:
+            table[int(pid_str)] = args.strip()
+        except ValueError:
+            continue
+    return table
+
+
+def descendants(root: int, parents: Dict[int, int]) -> set:
+    """Every pid beneath `root`, following the parent map downwards."""
+    children: Dict[int, List[int]] = {}
+    for pid, ppid in parents.items():
+        children.setdefault(ppid, []).append(pid)
+    found = set()
+    queue = list(children.get(root, []))
+    while queue:
+        pid = queue.pop()
+        if pid in found:
+            continue
+        found.add(pid)
+        queue.extend(children.get(pid, []))
+    return found

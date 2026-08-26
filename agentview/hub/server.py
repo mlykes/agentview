@@ -15,6 +15,7 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import mimetypes
 import os
@@ -30,6 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 from agentview.collector import context as context_mod
 from agentview.collector.core import collect
+from agentview.hub.ptys import PtyManager
 from agentview.hub.registry import Registry
 
 WEB_ROOT = Path(__file__).parent / "web"
@@ -59,9 +61,43 @@ def load_or_create_token() -> str:
 
 
 class HubState:
-    def __init__(self, registry: Registry, token: Optional[str]) -> None:
+    def __init__(
+        self,
+        registry: Registry,
+        token: Optional[str],
+        ptys: Optional[PtyManager] = None,
+        local_context_id: Optional[str] = None,
+        allow_input: bool = True,
+    ) -> None:
         self.registry = registry
         self.token = token  # None => auth disabled
+        self.ptys = ptys or PtyManager()
+        #: Only agents in this context can be attached to; see resolve_attach().
+        self.local_context_id = local_context_id
+        self.allow_input = allow_input
+
+    def resolve_attach(self, agent_id: str):
+        """(argv, error) for an agent, enforcing what this hub can actually reach.
+
+        argv always comes from the registry -- what the collector reported -- never
+        from the request.
+        """
+        agent = self.registry.find_agent(agent_id)
+        if agent is None:
+            return None, "no such agent"
+        attach = agent.get("attach") or {}
+        if not attach.get("available"):
+            return None, attach.get("reason") or "attach unavailable for this agent"
+        context_id = agent.get("context_id")
+        if self.local_context_id and context_id != self.local_context_id:
+            # The argv is written for the collector's machine. Running it here would
+            # attach to the wrong box, or to nothing. Remote attach needs the hub to
+            # reach that context (ssh / docker exec) and lands in a later milestone.
+            return None, "agent is on another machine - remote attach not supported yet"
+        argv = attach.get("argv")
+        if not argv or not isinstance(argv, list):
+            return None, "no attach command reported"
+        return argv, None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -131,12 +167,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._index(authorized=self._authorized(query))
         if path.startswith("/static/"):
             name = path[len("/static/"):]
+            # One optional "vendor/" segment; everything else is rejected rather
+            # than resolved, so no traversal can escape the web root.
+            if name.startswith("vendor/"):
+                leaf = name[len("vendor/"):]
+                if "/" in leaf or ".." in leaf or not leaf:
+                    return self._json(404, {"error": "not found"})
+                return self._file(WEB_ROOT / "vendor" / leaf)
             if "/" in name or ".." in name:
                 return self._json(404, {"error": "not found"})
             return self._file(WEB_ROOT / name)
 
         if not self._authorized(query):
             return self._json(401, {"error": "unauthorized"})
+
+        if path.startswith("/v1/attach/") and path.endswith("/stream"):
+            agent_id = path[len("/v1/attach/"):-len("/stream")]
+            return self._attach_stream(agent_id, query)
 
         if path == "/v1/view":
             return self._json(200, self.state.registry.view())
@@ -168,7 +215,92 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/snapshot":
             self.state.registry.ingest(payload)
             return self._json(200, {"ok": True})
+
+        if parsed.path.startswith("/v1/attach/"):
+            rest = parsed.path[len("/v1/attach/"):]
+            agent_id, _, action = rest.rpartition("/")
+            session = self.state.ptys.get(agent_id)
+
+            if action == "input":
+                if not self.state.allow_input:
+                    return self._json(403, {"error": "input disabled (--read-only)"})
+                if session is None:
+                    return self._json(404, {"error": "no live terminal"})
+                session.write(str(payload.get("d", "")).encode("utf-8"))
+                return self._json(200, {"ok": True})
+
+            if action == "resize":
+                if session is None:
+                    return self._json(404, {"error": "no live terminal"})
+                session.resize(int(payload.get("cols", 80)), int(payload.get("rows", 24)))
+                return self._json(200, {"ok": True})
+
+            if action == "close":
+                self.state.ptys.close(agent_id)
+                return self._json(200, {"ok": True})
+
         return self._json(404, {"error": "not found"})
+
+    def _attach_stream(self, agent_id: str, query):
+        argv, error = self.state.resolve_attach(agent_id)
+        if error:
+            return self._json(409, {"error": error})
+
+        try:
+            cols = int((query.get("cols") or ["120"])[0])
+            rows = int((query.get("rows") or ["32"])[0])
+        except ValueError:
+            cols, rows = 120, 32
+
+        session = self.state.ptys.get_or_start(agent_id, argv, cols, rows)
+
+        queue = []
+        event = threading.Event()
+
+        def send(data: bytes):
+            queue.append(data)
+            event.set()
+
+        # Replay scrollback so a viewer joining late sees the current screen rather
+        # than an empty pane until the agent next prints something.
+        backlog = session.scrollback()
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        sub_id = session.subscribe(send)
+        try:
+            if backlog:
+                self._sse(backlog)
+            last_ping = time.time()
+            while True:
+                event.wait(timeout=15.0)
+                event.clear()
+                while queue:
+                    self._sse(queue.pop(0))
+                if not session.alive and not queue:
+                    self._sse_raw("event: end\ndata: {}\n\n")
+                    break
+                if time.time() - last_ping > 15.0:
+                    # Keeps intermediaries and the browser from dropping an idle stream.
+                    self._sse_raw(": ping\n\n")
+                    last_ping = time.time()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # viewer navigated away
+        finally:
+            session.unsubscribe(sub_id)
+
+    def _sse(self, data: bytes) -> None:
+        """Terminal output is arbitrary bytes; base64 keeps it safe through SSE's
+        line-oriented framing."""
+        self._sse_raw("data: {}\n\n".format(base64.b64encode(data).decode("ascii")))
+
+    def _sse_raw(self, text: str) -> None:
+        self.wfile.write(text.encode("utf-8"))
+        self.wfile.flush()
 
     def _index(self, authorized: bool):
         try:
@@ -222,6 +354,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label", default=None, help="display label for this machine")
     parser.add_argument("--parent", default=None)
     parser.add_argument("--verbose", action="store_true", help="log every HTTP request")
+    parser.add_argument(
+        "--read-only", action="store_true",
+        help="never forward keystrokes to an agent's terminal",
+    )
     parser.add_argument("--ttl", type=float, default=15.0, help="seconds before a context expires")
     parser.add_argument(
         "--stuck-after", type=float, default=900.0,
@@ -243,7 +379,13 @@ def main(argv=None) -> int:
 
     token = None if args.no_auth else (args.token or load_or_create_token())
     registry = Registry(ttl=args.ttl, stuck_after=args.stuck_after)
-    Handler.state = HubState(registry, token)
+    local_ctx = context_mod.detect(parent_id=args.parent, label=args.label)
+    Handler.state = HubState(
+        registry,
+        token,
+        local_context_id=None if args.no_local else local_ctx.id,
+        allow_input=not args.read_only,
+    )
     Handler.verbose = args.verbose
 
     if not args.no_local:

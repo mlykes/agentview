@@ -157,3 +157,21 @@ class Registry:
         now = time.time()
         with self._lock:
             return [e["context"] for e in self._live(now)]
+
+    def find_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """One agent by id, with its context attached.
+
+        The hub reads the attach argv from here rather than accepting it from the
+        browser. A client-supplied argv would be arbitrary command execution behind
+        a loopback port.
+        """
+        now = time.time()
+        with self._lock:
+            entries = self._live(now)
+        for entry in entries:
+            for agent in entry["agents"]:
+                if agent.get("id") == agent_id:
+                    found = dict(agent)
+                    found["context"] = entry["context"]
+                    return found
+        return None

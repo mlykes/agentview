@@ -12,8 +12,11 @@
   // The token arrives as ?t=... on first load. Stash it so the URL can be cleaned up
   // and a refresh still works, then keep it out of the address bar.
   var token = null;
+  //: ?open=<agent id> deep-links straight to an agent's terminal.
+  var openOnLoad = null;
   try {
     var qs = new URLSearchParams(window.location.search);
+    openOnLoad = qs.get("open");
     token = qs.get("t") || sessionStorage.getItem("agentview_token");
     if (qs.get("t")) {
       sessionStorage.setItem("agentview_token", qs.get("t"));
@@ -50,7 +53,12 @@
   }
 
   function agentRow(agent) {
-    var row = el("div", "agent");
+    var attachable = agent.attach && agent.attach.available;
+    var row = el("div", "agent" + (attachable ? " attachable" : ""));
+    if (attachable) {
+      row.title = "open this agent's terminal";
+      row.addEventListener("click", function () { openTerminal(agent); });
+    }
 
     var state = agent.stuck ? "stuck" : agent.status;
     row.appendChild(el("span", "dot " + state));
@@ -88,7 +96,9 @@
     }
     // Be explicit about why the detail view is unavailable rather than silently
     // rendering a dead affordance.
-    if (agent.attach && !agent.attach.available && agent.attach.reason) {
+    if (attachable) {
+      row.appendChild(el("div", "attach-hint", "click to open terminal"));
+    } else if (agent.attach && agent.attach.reason) {
       row.appendChild(el("div", "no-attach", agent.attach.reason));
     }
     return row;
@@ -143,6 +153,16 @@
     if (t.stuck) totalsEl.appendChild(stat(t.stuck, "stuck", true));
   }
 
+  function findAgent(view, agentId) {
+    var found = null;
+    view.contexts.forEach(function (node) {
+      [node].concat(node.children || []).forEach(function (ctx) {
+        ctx.agents.forEach(function (a) { if (a.id === agentId) found = a; });
+      });
+    });
+    return found;
+  }
+
   function render(view) {
     renderTotals(view.totals);
     root.textContent = "";
@@ -151,6 +171,12 @@
       return;
     }
     view.contexts.forEach(function (node) { root.appendChild(contextCard(node, false)); });
+
+    if (openOnLoad) {
+      var target = findAgent(view, openOnLoad);
+      openOnLoad = null;
+      if (target && target.attach && target.attach.available) openTerminal(target);
+    }
   }
 
   function setConn(ok, text) {
@@ -174,6 +200,125 @@
         setConn(false, err.message || "hub unreachable");
       });
   }
+
+  /* --- terminal ------------------------------------------------------- */
+
+  var term = null, fit = null, stream = null, current = null;
+  var overlay = document.getElementById("term-overlay");
+  var body = document.getElementById("term-body");
+  var inputToggle = document.getElementById("term-input");
+  var foot = document.getElementById("term-foot");
+
+  function api(path, payload) {
+    return fetch(path + (token ? "?t=" + encodeURIComponent(token) : ""), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    });
+  }
+
+  function openTerminal(agent) {
+    closeTerminal();
+    current = agent;
+    overlay.hidden = false;
+    document.getElementById("term-title").textContent = agent.name;
+    document.getElementById("term-sub").textContent =
+      (agent.harness_label || agent.harness) + "  ·  " + (agent.cwd || "");
+    document.getElementById("term-dot").className = "term-dot";
+
+    term = new Terminal({
+      fontSize: 13,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      cursorBlink: false,
+      scrollback: 5000,
+      theme: { background: "#0b0e13", foreground: "#e7edf5" },
+    });
+    try {
+      fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+    } catch (e) { fit = null; }
+    term.open(body);
+    doFit();
+
+    // Keystrokes only leave the browser when input is explicitly enabled. Typing
+    // into a running agent by accident is a real way to derail it.
+    term.onData(function (data) {
+      if (!inputToggle.checked || !current) return;
+      api("/v1/attach/" + encodeURIComponent(current.id) + "/input", { d: data });
+    });
+
+    var url = "/v1/attach/" + encodeURIComponent(agent.id) + "/stream" +
+      "?cols=" + term.cols + "&rows=" + term.rows +
+      (token ? "&t=" + encodeURIComponent(token) : "");
+
+    // EventSource cannot set headers, which is why the token also travels as ?t=.
+    stream = new EventSource(url);
+    stream.onmessage = function (ev) {
+      try {
+        // atob() yields a binary string, which would mangle any multi-byte UTF-8 --
+        // and agent TUIs are full of box-drawing characters. xterm.js accepts a
+        // Uint8Array and does the decoding itself, including across chunk splits.
+        var raw = atob(ev.data);
+        var bytes = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        term.write(bytes);
+      } catch (e) { /* skip bad frame */ }
+    };
+    stream.addEventListener("end", function () {
+      document.getElementById("term-dot").className = "term-dot dead";
+      setFoot("session ended", false);
+      if (stream) { stream.close(); stream = null; }
+    });
+    stream.onerror = function () {
+      setFoot("stream interrupted — close and reopen to reconnect", false);
+    };
+    setFoot(null, inputToggle.checked);
+  }
+
+  function doFit() {
+    if (!fit || !term) return;
+    try {
+      fit.fit();
+      if (current) {
+        api("/v1/attach/" + encodeURIComponent(current.id) + "/resize",
+            { cols: term.cols, rows: term.rows });
+      }
+    } catch (e) { /* container not laid out yet */ }
+  }
+
+  function setFoot(message, live) {
+    if (message) { foot.textContent = message; foot.className = "term-foot"; return; }
+    if (live) {
+      foot.textContent = "input enabled — keystrokes go straight to this agent";
+      foot.className = "term-foot live";
+    } else {
+      foot.textContent = 'read-only — tick "allow input" to type into this agent';
+      foot.className = "term-foot";
+    }
+  }
+
+  function closeTerminal() {
+    if (stream) { stream.close(); stream = null; }
+    if (term) { term.dispose(); term = null; }
+    fit = null;
+    body.textContent = "";
+    overlay.hidden = true;
+    inputToggle.checked = false;
+    current = null;
+  }
+
+  document.getElementById("term-close").addEventListener("click", closeTerminal);
+  overlay.addEventListener("click", function (e) {
+    if (e.target === overlay) closeTerminal();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !overlay.hidden) closeTerminal();
+  });
+  inputToggle.addEventListener("change", function () {
+    setFoot(null, inputToggle.checked);
+    if (inputToggle.checked && term) term.focus();
+  });
+  window.addEventListener("resize", doFit);
 
   // Render the server-injected snapshot immediately so the first frame has real
   // content. Falls through to polling either way.

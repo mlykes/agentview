@@ -12,7 +12,7 @@ usage:
   agentview run -- <cmd>          launch an agent under tmux so it can be attached
   agentview hub                   serve the HUD
 
-Milestone status: `collect` works today. `run` and `hub` land in M3 and M2.
+Run `agentview <command> --help` for options.
 """
 
 
@@ -27,9 +27,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         from agentview.collector.__main__ import main as collector_main
 
         return collector_main(rest)
-    if command in ("run", "hub"):
-        print("agentview {}: not implemented yet".format(command), file=sys.stderr)
-        return 2
+    if command == "run":
+        from agentview.runner import main as runner_main
+
+        return runner_main(rest)
+    if command == "hub":
+        from agentview.hub.server import main as hub_main
+
+        return hub_main(rest)
 
     print("unknown command: {}\n".format(command), file=sys.stderr)
     print(USAGE, file=sys.stderr)

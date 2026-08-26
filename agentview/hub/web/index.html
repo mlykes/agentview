@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agentview</title>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128065;</text></svg>">
 </head>
@@ -25,7 +26,23 @@
   <span id="footer-note">Presence is read from each harness on disk. Detail view attaches to the agent's own terminal — coming in M3.</span>
 </footer>
 
+<div class="term-overlay" id="term-overlay" hidden>
+  <div class="term-panel">
+    <div class="term-head">
+      <span class="term-dot" id="term-dot"></span>
+      <span class="term-title" id="term-title">terminal</span>
+      <span class="term-sub" id="term-sub"></span>
+      <label class="term-toggle"><input type="checkbox" id="term-input"> allow input</label>
+      <button class="term-close" id="term-close" title="close">&times;</button>
+    </div>
+    <div class="term-body" id="term-body"></div>
+    <div class="term-foot" id="term-foot">read-only — tick "allow input" to type into this agent</div>
+  </div>
+</div>
+
 <!--BOOTSTRAP-->
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/addon-fit.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

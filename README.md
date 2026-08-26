@@ -51,12 +51,31 @@ python3 -m agentview.collector --hub http://<hub-host>:7788 --token <token> \
 
 ## Status
 
-**M1 (collector + Claude Code adapter) and M2 (hub + overview UI) work.** Next is M3,
-terminal attach. See `PROTOCOL.md` for the wire format.
+**M1–M3 work**: collector, hub + overview UI, and terminal attach.
 
-Supported today: Claude Code (rich adapter), plus any tool that writes a heartbeat file
-to `~/.agentview/agents/*.json` — the documented integration path for a harness
-agentview has never seen. Generic tmux/process discovery lands in M5.
+Click any attachable agent and its own terminal opens in the browser — agentview does
+not parse or re-render transcripts, it attaches to the session the harness is already
+drawing. Read-only by default; input is a deliberate per-session toggle, because typing
+into a running agent by accident is a real way to derail it.
+
+Supported today:
+- **Claude Code** — rich adapter reading its session registry
+- **Any harness running in tmux** — recognised by process name from a table you can
+  extend in `~/.agentview/harnesses.json`, no code change
+- **Anything else** — write a heartbeat file to `~/.agentview/agents/*.json`
+
+## Attaching to an agent
+
+You cannot attach to the PTY of a process started outside a multiplexer — that is an OS
+fact, not something agentview can engineer around. So launch agents through the shim:
+
+```bash
+agentview run -- claude
+agentview run --name api -- opencode
+```
+
+Agents started normally still appear in the HUD; their terminal view is disabled with an
+explicit reason rather than silently doing nothing.
 
 ## Zero dependencies, by hard requirement
 
