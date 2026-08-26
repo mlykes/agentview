@@ -203,7 +203,7 @@
 
   /* --- terminal ------------------------------------------------------- */
 
-  var term = null, fit = null, stream = null, current = null;
+  var term = null, fit = null, stream = null, current = null, streamLive = false;
   var overlay = document.getElementById("term-overlay");
   var body = document.getElementById("term-body");
   var inputToggle = document.getElementById("term-input");
@@ -220,6 +220,7 @@
   function openTerminal(agent) {
     closeTerminal();
     current = agent;
+    streamLive = false;
     overlay.hidden = false;
     document.getElementById("term-title").textContent = agent.name;
     document.getElementById("term-sub").textContent =
@@ -262,6 +263,7 @@
         var bytes = new Uint8Array(raw.length);
         for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
         term.write(bytes);
+        if (!streamLive) { streamLive = true; setFoot(null, inputToggle.checked); }
       } catch (e) { /* skip bad frame */ }
     };
     stream.addEventListener("end", function () {
@@ -269,8 +271,15 @@
       setFoot("session ended", false);
       if (stream) { stream.close(); stream = null; }
     });
+    // EventSource reconnects on its own, so this is a transient state, not a dead
+    // end -- saying "close and reopen" would send the user to do work the browser
+    // is already doing.
     stream.onerror = function () {
-      setFoot("stream interrupted — close and reopen to reconnect", false);
+      if (stream && stream.readyState === 2) {
+        setFoot("terminal disconnected", false);
+      } else {
+        setFoot("reconnecting…", false);
+      }
     };
     setFoot(null, inputToggle.checked);
   }
