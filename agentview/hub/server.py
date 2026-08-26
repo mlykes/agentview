@@ -70,8 +70,14 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- plumbing ---------------------------------------------------------
 
-    def log_message(self, fmt, *args):  # noqa: A003 - quiet by default
-        pass
+    #: Set by --verbose. Access logging is off by default because a HUD polling
+    #: every 2s would otherwise bury the startup banner.
+    verbose = False
+
+    def log_message(self, fmt, *args):  # noqa: A003
+        if self.verbose:
+            sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+            sys.stderr.flush()
 
     def _authorized(self, query: Dict[str, Any]) -> bool:
         if self.state.token is None:
@@ -112,23 +118,25 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/health":
             return self._json(200, {"ok": True, "version": "0.1.0"})
 
-        if not self._authorized(query):
-            if path == "/" or path.startswith("/static"):
-                return self._send(
-                    401,
-                    b"<h1>agentview</h1><p>Add <code>?t=&lt;token&gt;</code> to the URL. "
-                    b"The hub prints the full link on startup.</p>",
-                    "text/html; charset=utf-8",
-                )
-            return self._json(401, {"error": "unauthorized"})
-
+        # The shell page and its assets are served without a token, for two reasons:
+        # they contain no session data, and a browser cannot attach an Authorization
+        # header to a subresource request like <script src> or <link rel=stylesheet>.
+        # Gating them here silently 401'd the stylesheet and the script, leaving an
+        # unstyled page stuck on "Loading...". Auth belongs on /v1/*, which is where
+        # the agent data actually lives.
         if path in ("/", "/index.html"):
-            return self._file(WEB_ROOT / "index.html")
+            # Paint with real data on first frame instead of flashing "Loading...".
+            # Only for an authorized request: an unauthenticated / must not carry
+            # session data, which is the whole reason /v1/* is gated.
+            return self._index(authorized=self._authorized(query))
         if path.startswith("/static/"):
             name = path[len("/static/"):]
             if "/" in name or ".." in name:
                 return self._json(404, {"error": "not found"})
             return self._file(WEB_ROOT / name)
+
+        if not self._authorized(query):
+            return self._json(401, {"error": "unauthorized"})
 
         if path == "/v1/view":
             return self._json(200, self.state.registry.view())
@@ -161,6 +169,20 @@ class Handler(BaseHTTPRequestHandler):
             self.state.registry.ingest(payload)
             return self._json(200, {"ok": True})
         return self._json(404, {"error": "not found"})
+
+    def _index(self, authorized: bool):
+        try:
+            html = (WEB_ROOT / "index.html").read_text()
+        except OSError:
+            return self._json(404, {"error": "not found"})
+        if authorized:
+            payload = json.dumps(self.state.registry.view(), default=str)
+            # A non-executable data block; app.js reads it. Inert under CSP.
+            tag = '<script type="application/json" id="bootstrap">{}</script>'.format(
+                payload.replace("<", "\\u003c")
+            )
+            html = html.replace("<!--BOOTSTRAP-->", tag)
+        return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
     def _file(self, path: Path):
         try:
@@ -199,6 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token", default=None, help="use this token instead of ~/.agentview/token")
     parser.add_argument("--label", default=None, help="display label for this machine")
     parser.add_argument("--parent", default=None)
+    parser.add_argument("--verbose", action="store_true", help="log every HTTP request")
     parser.add_argument("--ttl", type=float, default=15.0, help="seconds before a context expires")
     parser.add_argument(
         "--stuck-after", type=float, default=900.0,
@@ -221,6 +244,7 @@ def main(argv=None) -> int:
     token = None if args.no_auth else (args.token or load_or_create_token())
     registry = Registry(ttl=args.ttl, stuck_after=args.stuck_after)
     Handler.state = HubState(registry, token)
+    Handler.verbose = args.verbose
 
     if not args.no_local:
         thread = threading.Thread(

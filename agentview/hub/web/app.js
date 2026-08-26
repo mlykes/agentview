@@ -175,6 +175,18 @@
       });
   }
 
+  // Render the server-injected snapshot immediately so the first frame has real
+  // content. Falls through to polling either way.
+  try {
+    var boot = document.getElementById("bootstrap");
+    if (boot && boot.textContent) {
+      render(JSON.parse(boot.textContent));
+      setConn(true, "live");
+    }
+  } catch (e) {
+    /* fall back to the poll below */
+  }
+
   tick();
   setInterval(tick, POLL_MS);
 })();
