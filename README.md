@@ -81,16 +81,25 @@ Supported today:
 
 ## Attaching to an agent
 
-You cannot attach to the PTY of a process started outside a multiplexer — that is an OS
-fact, not something agentview can engineer around. So launch agents through the shim:
+Click **+ new agent** in the HUD. It lists the agent CLIs actually installed on that
+machine, starts the one you pick under tmux, and opens its terminal as soon as it
+registers. No command to type, no terminal to go find.
+
+The same thing from a shell, if you prefer:
 
 ```bash
 python3 -m agentview run -- claude
 python3 -m agentview run --name api -- opencode
 ```
 
-Agents started normally still appear in the HUD; their terminal view is disabled with an
-explicit reason rather than silently doing nothing.
+Agents started *elsewhere* still appear in the HUD, but cannot be attached to: you
+cannot add a PTY to a process that is already running outside a multiplexer. That is an
+OS constraint, not something agentview can work around, so those rows say so plainly
+rather than offering a button that would do nothing.
+
+The browser never supplies a command. It names a harness, and the hub resolves the
+binary from its own table — otherwise a loopback port would be arbitrary code
+execution. `--no-launch` turns the feature off, and `--read-only` implies it.
 
 `agentview run` clears the environment variables that identify a *parent* agent session
 before launching. Without that, an agent started from inside another agent inherits its

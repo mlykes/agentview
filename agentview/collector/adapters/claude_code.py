@@ -227,7 +227,7 @@ class ClaudeCodeAdapter(Adapter):
                 # M3 fills this in for tmux-launched agents; until then be explicit
                 # about why the detail view is disabled rather than silently dead.
                 attach=AttachSpec.unavailable(
-                    "started outside tmux - relaunch with `agentview run` to attach"
+                    "started outside tmux - no terminal to attach to"
                 ),
                 source=self.name,
                 extra={

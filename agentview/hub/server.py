@@ -20,6 +20,7 @@ import json
 import mimetypes
 import os
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -31,6 +32,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from agentview.collector import context as context_mod
 from agentview.collector.core import collect
+from agentview import harnesses
+from agentview import runner
 from agentview.hub.ptys import PtyManager
 from agentview.hub.registry import Registry
 
@@ -60,6 +63,30 @@ def load_or_create_token() -> str:
     return token
 
 
+def available_harnesses():
+    """Harnesses from the table that are actually installed here.
+
+    Resolved with shutil.which so the UI only ever offers something that can start,
+    and so the command handed to tmux comes from this side.
+    """
+    found = []
+    for command, identity in sorted(harnesses.load().items()):
+        path = shutil.which(command)
+        if path:
+            found.append({
+                "harness": identity["harness"],
+                "label": identity["label"],
+                "command": path,
+            })
+    # One entry per harness, even when several commands map to it.
+    seen, unique = set(), []
+    for entry in found:
+        if entry["harness"] not in seen:
+            seen.add(entry["harness"])
+            unique.append(entry)
+    return unique
+
+
 class HubState:
     def __init__(
         self,
@@ -68,6 +95,7 @@ class HubState:
         ptys: Optional[PtyManager] = None,
         local_context_id: Optional[str] = None,
         allow_input: bool = True,
+        can_launch: bool = True,
     ) -> None:
         self.registry = registry
         self.token = token  # None => auth disabled
@@ -75,6 +103,9 @@ class HubState:
         #: Only agents in this context can be attached to; see resolve_attach().
         self.local_context_id = local_context_id
         self.allow_input = allow_input
+        #: Whether the UI may start new agents. Off when the hub is read-only --
+        #: a monitoring deployment should not be able to spawn processes.
+        self.can_launch = can_launch and allow_input
 
     def resolve_attach(self, agent_id: str):
         """(argv, error) for an agent, enforcing what this hub can actually reach.
@@ -199,6 +230,10 @@ class Handler(BaseHTTPRequestHandler):
             agent_id = unquote(path[len("/v1/attach/"):-len("/stream")])
             return self._attach_stream(agent_id, query)
 
+        if path == "/v1/harnesses":
+            return self._json(200, {"harnesses": available_harnesses(),
+                                    "can_launch": self.state.can_launch})
+
         if path == "/v1/view":
             return self._json(200, self.state.registry.view())
         if path == "/v1/agents":
@@ -226,6 +261,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/v1/hello":
             return self._json(200, {"ok": True, "ttl": self.state.registry.ttl})
+        if parsed.path == "/v1/launch":
+            if not self.state.can_launch:
+                return self._json(403, {"error": "launching is disabled on this hub"})
+            requested = str(payload.get("harness") or "")
+            # The command is resolved from the server's own harness table. The browser
+            # names a harness; it never supplies a command, or this would be arbitrary
+            # execution behind a loopback port.
+            match = next(
+                (h for h in available_harnesses() if h["harness"] == requested), None
+            )
+            if match is None:
+                return self._json(400, {"error": "unknown or unavailable harness"})
+            name = str(payload.get("name") or "").strip() or match["harness"]
+            try:
+                session = runner.launch_detached([match["command"]], name)
+            except Exception as exc:  # noqa: BLE001 - report, do not traceback at a browser
+                return self._json(500, {"error": str(exc)})
+            return self._json(200, {"ok": True, "session": session,
+                                    "harness": match["harness"]})
+
         if parsed.path == "/v1/snapshot":
             self.state.registry.ingest(payload)
             return self._json(200, {"ok": True})
@@ -422,6 +477,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--read-only", action="store_true",
         help="never forward keystrokes to an agent's terminal",
     )
+    parser.add_argument(
+        "--no-launch", action="store_true",
+        help="do not allow starting new agents from the UI",
+    )
     parser.add_argument("--ttl", type=float, default=15.0, help="seconds before a context expires")
     parser.add_argument(
         "--stuck-after", type=float, default=900.0,
@@ -449,6 +508,7 @@ def main(argv=None) -> int:
         token,
         local_context_id=None if args.no_local else local_ctx.id,
         allow_input=not args.read_only,
+        can_launch=not args.no_launch,
     )
     Handler.verbose = args.verbose
 

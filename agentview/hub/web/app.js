@@ -172,6 +172,8 @@
     }
     view.contexts.forEach(function (node) { root.appendChild(contextCard(node, false)); });
 
+    claimPending(view);
+
     if (openOnLoad) {
       var target = findAgent(view, openOnLoad);
       openOnLoad = null;
@@ -200,6 +202,78 @@
         setConn(false, err.message || "hub unreachable");
       });
   }
+
+  /* --- launching a new agent ------------------------------------------ */
+
+  var launchWrap = document.getElementById("launch");
+  var launchBtn = document.getElementById("launch-btn");
+  var launchMenu = document.getElementById("launch-menu");
+  var pendingSession = null;
+
+  function loadHarnesses() {
+    fetch("/v1/harnesses" + (token ? "?t=" + encodeURIComponent(token) : ""),
+          { headers: token ? { Authorization: "Bearer " + token } : {} })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !data.can_launch) return;
+        launchWrap.hidden = false;
+        launchMenu.textContent = "";
+        if (!data.harnesses.length) {
+          launchMenu.appendChild(el("div", "none", "no agent CLIs found on PATH"));
+          return;
+        }
+        data.harnesses.forEach(function (h) {
+          var item = el("button", null, h.label);
+          item.addEventListener("click", function () { launch(h); });
+          launchMenu.appendChild(item);
+        });
+      })
+      .catch(function () { /* launching stays hidden */ });
+  }
+
+  function launch(harness) {
+    launchMenu.hidden = true;
+    launchBtn.disabled = true;
+    launchBtn.textContent = "starting " + harness.label + "…";
+    api("/v1/launch", { harness: harness.harness })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error(res.body.error || "could not start it");
+        // The agent takes a moment to register. Remember the tmux session and open
+        // its terminal as soon as the next poll shows it.
+        pendingSession = res.body.session;
+        launchBtn.textContent = "waiting for " + harness.label + "…";
+        tick();
+      })
+      .catch(function (err) {
+        launchBtn.disabled = false;
+        launchBtn.textContent = "+ new agent";
+        alert("Could not start the agent: " + err.message);
+      });
+  }
+
+  function claimPending(view) {
+    if (!pendingSession) return;
+    var found = null;
+    view.contexts.forEach(function (node) {
+      [node].concat(node.children || []).forEach(function (ctx) {
+        ctx.agents.forEach(function (a) {
+          if (a.extra && a.extra.tmux_session === pendingSession) found = a;
+        });
+      });
+    });
+    if (!found || !found.attach || !found.attach.available) return;
+    pendingSession = null;
+    launchBtn.disabled = false;
+    launchBtn.textContent = "+ new agent";
+    openTerminal(found);
+  }
+
+  launchBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    launchMenu.hidden = !launchMenu.hidden;
+  });
+  document.addEventListener("click", function () { launchMenu.hidden = true; });
 
   /* --- terminal ------------------------------------------------------- */
 
@@ -367,6 +441,7 @@
     /* fall back to the poll below */
   }
 
+  loadHarnesses();
   tick();
   setInterval(tick, POLL_MS);
 })();

@@ -13,10 +13,14 @@ from __future__ import annotations
 import json
 import threading
 import unittest
+from pathlib import Path
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
+from unittest import mock
+
+from agentview import runner
 from agentview.hub.registry import Registry
 from agentview.hub.server import Handler, HubState
 
@@ -234,3 +238,88 @@ class BootstrapTest(ServerTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaunchTest(ServerTestBase):
+    """Starting an agent from the UI.
+
+    The browser names a harness; the command is resolved from the server's own
+    table. If a client could supply a command this would be arbitrary execution
+    behind a loopback port.
+    """
+
+    def _post(self, path, payload, token=TOKEN):
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        if token:
+            request.add_header("Authorization", "Bearer " + token)
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                return response.status, json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode()
+            try:
+                return exc.code, json.loads(body)
+            except ValueError:
+                return exc.code, {"raw": body}
+
+    def test_harness_list_requires_a_token(self):
+        status, _ = get(self.base + "/v1/harnesses")
+        self.assertEqual(status, 401)
+
+    def test_harness_list_only_offers_installed_commands(self):
+        import shutil
+
+        _, body = get(self.base + "/v1/harnesses", token=TOKEN)
+        for entry in json.loads(body)["harnesses"]:
+            self.assertTrue(shutil.which(entry["command"]) or Path(entry["command"]).exists())
+
+    def test_launch_requires_a_token(self):
+        status, _ = self._post("/v1/launch", {"harness": "claude-code"}, token=None)
+        self.assertEqual(status, 401)
+
+    def test_unknown_harness_is_refused(self):
+        status, body = self._post("/v1/launch", {"harness": "definitely-not-real"})
+        self.assertEqual(status, 400)
+        self.assertIn("unknown", body["error"])
+
+    def test_a_path_is_not_a_harness_name(self):
+        for attempt in ("/bin/sh", "../../bin/sh", "sh -c 'echo pwned'", "rm -rf /"):
+            status, _ = self._post("/v1/launch", {"harness": attempt})
+            self.assertEqual(status, 400, "accepted {!r}".format(attempt))
+
+    def test_a_client_supplied_command_is_ignored(self):
+        """Even alongside a valid harness name, `command` must not be honoured."""
+        captured = {}
+
+        def fake_launch(command, name):
+            captured["command"] = command
+            return "agentview_test"
+
+        with mock.patch.object(runner, "launch_detached", fake_launch):
+            status, _ = self._post(
+                "/v1/launch",
+                {"harness": "claude-code", "command": "/bin/sh", "argv": ["/bin/sh"]},
+            )
+        if status == 200:
+            self.assertNotIn("/bin/sh", captured.get("command", []))
+        else:
+            self.assertEqual(status, 400)  # claude not installed in this environment
+
+
+class LaunchPolicyTest(unittest.TestCase):
+    def test_read_only_hub_cannot_launch(self):
+        """A monitoring deployment must not be able to spawn processes."""
+        state = HubState(Registry(), token=None, allow_input=False, can_launch=True)
+        self.assertFalse(state.can_launch)
+
+    def test_no_launch_flag_disables_it(self):
+        state = HubState(Registry(), token=None, allow_input=True, can_launch=False)
+        self.assertFalse(state.can_launch)
+
+    def test_default_allows_launching(self):
+        self.assertTrue(HubState(Registry(), token=None).can_launch)

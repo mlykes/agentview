@@ -112,6 +112,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def launch_detached(command: List[str], name: str) -> str:
+    """Start `command` in a detached tmux session and return the session name.
+
+    Shared by the CLI and by the hub's launch endpoint, so a session started from
+    the UI is identical to one started by hand -- same naming, same environment
+    sanitation.
+    """
+    if not tmux.available():
+        raise RuntimeError("tmux is not installed, and it is what makes attach possible")
+
+    session = unique_session_name(name)
+    create = (
+        ["tmux", "new-session", "-d", "-s", session, "-n", slugify(name)]
+        + sanitize(command)
+    )
+    result = subprocess.run(create, capture_output=True, text=True, timeout=20)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "tmux refused to start the session")
+    return session
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -132,11 +153,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     name = args.name or os.path.basename(command[0])
-    session = unique_session_name(name)
 
     # -A would attach to an existing session of the same name; we picked a unique one
     # above so each launch is its own session.
-    launched = sanitize(command)
     stripped = inherited_session_vars()
     if stripped:
         print(
@@ -144,14 +163,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             .format(len(stripped)),
             file=sys.stderr,
         )
-    create = ["tmux", "new-session", "-d", "-s", session, "-n", slugify(name)] + launched
     try:
-        result = subprocess.run(create, capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError) as exc:
-        print("could not start tmux session: {}".format(exc), file=sys.stderr)
-        return 1
-    if result.returncode != 0:
-        print("tmux refused to start the session: {}".format(result.stderr.strip()), file=sys.stderr)
+        session = launch_detached(command, name)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        print("could not start agent: {}".format(exc), file=sys.stderr)
         return 1
 
     print("started '{}' in tmux session {}".format(name, session), file=sys.stderr)

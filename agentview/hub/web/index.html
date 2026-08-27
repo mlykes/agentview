@@ -15,6 +15,10 @@
     <h1>agentview</h1>
   </div>
   <div class="totals" id="totals"></div>
+  <div class="launch" id="launch" hidden>
+    <button class="launch-btn" id="launch-btn">+ new agent</button>
+    <div class="launch-menu" id="launch-menu" hidden></div>
+  </div>
   <div class="conn" id="conn"><span class="conn-dot"></span><span id="conn-text">connecting</span></div>
 </header>
 
@@ -23,7 +27,9 @@
 </main>
 
 <footer class="footer">
-  <span id="footer-note">Presence is read from each harness on disk. Detail view attaches to the agent's own terminal — coming in M3.</span>
+  <span id="footer-note">Presence is read from each harness on disk. Agents started with
+  <b>+ new agent</b> run under tmux and open a live terminal here; agents started elsewhere
+  can be watched but not attached to, since a PTY cannot be added to a running process.</span>
 </footer>
 
 <div class="term-overlay" id="term-overlay" hidden>
