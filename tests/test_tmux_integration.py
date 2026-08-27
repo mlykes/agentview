@@ -60,9 +60,11 @@ class TmuxAttachTest(unittest.TestCase):
         agent = self._our_session(records)[0]
         self.assertTrue(agent.attach.available)
         self.assertIn(SESSION, agent.attach.argv)
-        # Read-only by default; the read-write variant is a separate argv.
-        self.assertIn("-r", agent.attach.argv)
-        self.assertNotIn("-r", agent.attach.argv_readwrite or [])
+        # A normal interactive attach by default -- the terminal should behave like
+        # the terminal you would otherwise run this agent in.
+        self.assertNotIn("-r", agent.attach.argv)
+        # The read-only variant exists for a hub started with --read-only.
+        self.assertIn("-r", agent.attach.argv_readonly or [])
 
     def test_collect_surfaces_it_end_to_end(self):
         snapshot = collect()

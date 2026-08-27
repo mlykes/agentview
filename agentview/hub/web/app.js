@@ -206,8 +206,8 @@
   var term = null, fit = null, stream = null, current = null, streamLive = false;
   var overlay = document.getElementById("term-overlay");
   var body = document.getElementById("term-body");
-  var inputToggle = document.getElementById("term-input");
   var foot = document.getElementById("term-foot");
+  var stateEl = document.getElementById("term-state");
 
   function b64bytes(b64) {
     // atob() yields a binary string, which would mangle multi-byte UTF-8 -- and
@@ -236,12 +236,19 @@
     document.getElementById("term-sub").textContent =
       (agent.harness_label || agent.harness) + "  ·  " + (agent.cwd || "");
     document.getElementById("term-dot").className = "term-dot";
+    if (stateEl) stateEl.textContent = "";
 
     term = new Terminal({
       fontSize: 13,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-      cursorBlink: false,
-      scrollback: 5000,
+      cursorBlink: true,
+      scrollback: 10000,
+      // Option-as-Meta matches how a Mac terminal is normally configured, so
+      // alt-word-motion behaves the way it does in iTerm2.
+      macOptionIsMeta: true,
+      // Right-click should offer the browser's own copy/paste rather than being
+      // swallowed as a terminal event.
+      rightClickSelectsWord: true,
       theme: { background: "#0b0e13", foreground: "#e7edf5" },
     });
     try {
@@ -255,6 +262,8 @@
     // waits on before it will paint. Read-only is enforced by the session running
     // `tmux attach -r`, which discards keystrokes server-side -- a stronger
     // guarantee than the browser choosing not to send them.
+    // Everything the terminal emits goes to the PTY -- keystrokes and the protocol
+    // replies tmux waits on alike. This is a terminal; it behaves like one.
     term.onData(function (data) {
       if (!current) return;
       api("/v1/attach/" + encodeURIComponent(current.id) + "/input", { d: data });
@@ -269,6 +278,7 @@
         if (parsed.agent_id === agent.id && parsed.data) {
           term.write(b64bytes(parsed.data));
           streamLive = true;
+          setFoot(null, true);   // content is on screen; don't keep saying "connecting"
         }
       }
     } catch (e) { /* the stream will fill it in */ }
@@ -285,7 +295,7 @@
         // and agent TUIs are full of box-drawing characters. xterm.js accepts a
         // Uint8Array and does the decoding itself, including across chunk splits.
         term.write(b64bytes(ev.data));
-        if (!streamLive) { streamLive = true; setFoot(null, inputToggle.checked); }
+        if (!streamLive) { streamLive = true; setFoot(null, true); }
       } catch (e) { /* skip bad frame */ }
     };
     stream.addEventListener("end", function () {
@@ -303,7 +313,8 @@
         setFoot("reconnecting…", false);
       }
     };
-    setFoot(null, inputToggle.checked);
+    setFoot(null, false);
+    term.focus();
   }
 
   function doFit() {
@@ -318,14 +329,8 @@
   }
 
   function setFoot(message, live) {
-    if (message) { foot.textContent = message; foot.className = "term-foot"; return; }
-    if (live) {
-      foot.textContent = "input enabled — keystrokes go straight to this agent";
-      foot.className = "term-foot live";
-    } else {
-      foot.textContent = 'read-only — tick "allow input" to type into this agent';
-      foot.className = "term-foot";
-    }
+    foot.textContent = message || (live ? "connected" : "connecting…");
+    foot.className = "term-foot" + (live && !message ? " live" : "");
   }
 
   function closeTerminal() {
@@ -334,7 +339,6 @@
     fit = null;
     body.textContent = "";
     overlay.hidden = true;
-    inputToggle.checked = false;
     current = null;
   }
 
@@ -343,51 +347,12 @@
     if (e.target === overlay) closeTerminal();
   });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && !overlay.hidden) closeTerminal();
+    // Only when focus is outside the terminal -- inside it, Escape belongs to the
+    // agent, which is the whole point of behaving like a real terminal.
+    if (e.key === "Escape" && !overlay.hidden && !body.contains(document.activeElement)) {
+      closeTerminal();
+    }
   });
-  inputToggle.addEventListener("change", function () {
-    if (!current) return;
-    var wanted = inputToggle.checked;
-    var agent = current;
-    setFoot(wanted ? "enabling input…" : "returning to read-only…", false);
-    api("/v1/attach/" + encodeURIComponent(agent.id) + "/mode", { input: wanted })
-      .then(function (r) {
-        if (!r.ok) {
-          return r.json().then(function (body) {
-            inputToggle.checked = !wanted;
-            setFoot(body.error || "could not change mode", false);
-          });
-        }
-        // The tmux client was replaced, so the old stream is stale.
-        reopenStream(agent, wanted);
-      })
-      .catch(function () {
-        inputToggle.checked = !wanted;
-        setFoot("could not change mode", false);
-      });
-  });
-
-  function reopenStream(agent, inputOn) {
-    if (stream) { stream.close(); stream = null; }
-    if (term) term.reset();
-    streamLive = false;
-    var url = "/v1/attach/" + encodeURIComponent(agent.id) + "/stream" +
-      "?cols=" + (term ? term.cols : 120) + "&rows=" + (term ? term.rows : 32) +
-      (token ? "&t=" + encodeURIComponent(token) : "");
-    stream = new EventSource(url);
-    stream.onmessage = function (ev) {
-      try {
-        term.write(b64bytes(ev.data));
-        if (!streamLive) { streamLive = true; setFoot(null, inputOn); }
-      } catch (e) { /* skip bad frame */ }
-    };
-    stream.addEventListener("end", function () {
-      document.getElementById("term-dot").className = "term-dot dead";
-      setFoot("session ended", false);
-      if (stream) { stream.close(); stream = null; }
-    });
-    if (inputOn && term) term.focus();
-  }
   window.addEventListener("resize", doFit);
 
   // Render the server-injected snapshot immediately so the first frame has real

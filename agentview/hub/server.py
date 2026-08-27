@@ -94,23 +94,14 @@ class HubState:
             # attach to the wrong box, or to nothing. Remote attach needs the hub to
             # reach that context (ssh / docker exec) and lands in a later milestone.
             return None, "agent is on another machine - remote attach not supported yet"
-        argv = attach.get("argv")
+        # A normal attach unless this hub was started with --read-only, which is a
+        # deployment-wide choice. There is no per-session toggle: the terminal should
+        # behave like the terminal you would otherwise run this agent in.
+        key = "argv" if self.allow_input else "argv_readonly"
+        argv = attach.get(key) or attach.get("argv")
         if not argv or not isinstance(argv, list):
             return None, "no attach command reported"
         return argv, None
-
-    def resolve_attach_rw(self, agent_id: str):
-        """The read-write attach argv, for when a viewer explicitly enables input."""
-        agent = self.registry.find_agent(agent_id)
-        if agent is None:
-            return None, "no such agent"
-        argv, error = self.resolve_attach(agent_id)
-        if error:
-            return None, error
-        rw = (agent.get("attach") or {}).get("argv_readwrite")
-        if not rw or not isinstance(rw, list):
-            return None, "this agent cannot accept input"
-        return rw, None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -257,22 +248,6 @@ class Handler(BaseHTTPRequestHandler):
                 session.write(str(payload.get("d", "")).encode("utf-8"))
                 return self._json(200, {"ok": True})
 
-            if action == "mode":
-                want_input = bool(payload.get("input"))
-                if want_input and not self.state.allow_input:
-                    return self._json(403, {"error": "input disabled on this hub (--read-only)"})
-                if want_input:
-                    argv, error = self.state.resolve_attach_rw(agent_id)
-                else:
-                    argv, error = self.state.resolve_attach(agent_id)
-                if error:
-                    return self._json(409, {"error": error})
-                # Read-only is a property of the tmux client, so changing it means
-                # replacing the session. The browser reopens its stream after this.
-                self.state.ptys.close(agent_id)
-                self.state.ptys.get_or_start(agent_id, argv, 120, 32)
-                return self._json(200, {"ok": True, "input": want_input})
-
             if action == "resize":
                 if session is None:
                     return self._json(404, {"error": "no live terminal"})
@@ -297,6 +272,9 @@ class Handler(BaseHTTPRequestHandler):
             cols, rows = 120, 32
 
         session = self.state.ptys.get_or_start(agent_id, argv, cols, rows)
+        # An existing session was sized by whoever opened it first. Resize on every
+        # connect so the terminal matches this window rather than a stale one.
+        session.resize(cols, rows)
 
         queue = []
         event = threading.Event()

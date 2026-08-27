@@ -136,12 +136,14 @@ main { padding: 20px 22px 40px; max-width: 1180px; margin: 0 auto; }
   position: fixed; inset: 0; z-index: 50;
   background: rgba(6, 9, 14, .55);
   display: flex; align-items: center; justify-content: center;
-  padding: 3vh 3vw;
+  /* Close to full-bleed: this is a terminal, and cramming it into a small modal
+     is the fastest way to make it not feel like one. */
+  padding: 2vh 2vw;
 }
 .term-overlay[hidden] { display: none; }
 .term-panel {
   display: flex; flex-direction: column;
-  width: 100%; max-width: 1180px; height: 100%;
+  width: 100%; max-width: 1600px; height: 100%;
   background: #0b0e13; color: #e7edf5;
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
   box-shadow: 0 24px 60px rgba(0,0,0,.45);
@@ -155,7 +157,7 @@ main { padding: 20px 22px 40px; max-width: 1180px; margin: 0 auto; }
 .term-dot.dead { background: var(--stuck); }
 .term-title { font-weight: 620; }
 .term-sub { color: #7d8a9c; font-size: 12px; font-family: var(--mono); }
-.term-toggle { margin-left: auto; display: flex; align-items: center; gap: 6px; color: #9aa7b8; font-size: 12px; cursor: pointer; }
+.term-state { margin-left: auto; color: #7d8a9c; font-size: 12px; font-family: var(--mono); }
 .term-close {
   background: none; border: 0; color: #9aa7b8; font-size: 22px; line-height: 1;
   cursor: pointer; padding: 0 4px;

@@ -23,12 +23,13 @@ from agentview.model import STATUS_UNKNOWN, AgentRecord, AttachSpec, ContextRef
 
 
 def attach_for_session(session: str) -> AttachSpec:
-    """Read-only by default. A stray keystroke into a running agent is a real way
-    to derail it, so input is opt-in per session in the UI."""
+    """A normal interactive attach, so the browser terminal behaves like the one you
+    would have run the agent in. The read-only variant is offered for a hub started
+    with --read-only, which is a deployment choice rather than a per-session one."""
     return AttachSpec(
         available=True,
-        argv=["tmux", "attach", "-r", "-t", session],
-        argv_readwrite=["tmux", "attach", "-t", session],
+        argv=["tmux", "attach", "-t", session],
+        argv_readonly=["tmux", "attach", "-r", "-t", session],
     )
 
 

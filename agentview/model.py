@@ -36,11 +36,11 @@ class AttachSpec:
     #: Why attach is unavailable, shown directly in the UI. Be honest here rather
     #: than silently disabling the button.
     reason: Optional[str] = None
-    #: Command yielding an interactive PTY. Read-only by default so a stray
-    #: keystroke cannot derail a running agent.
+    #: Command yielding a normal interactive PTY -- the terminal behaves like any
+    #: other terminal you would run this agent in.
     argv: Optional[List[str]] = None
-    #: Command for a read-write attach, used only when the user toggles input on.
-    argv_readwrite: Optional[List[str]] = None
+    #: Read-only variant, used only when the hub runs with --read-only.
+    argv_readonly: Optional[List[str]] = None
 
     @classmethod
     def unavailable(cls, reason: str) -> "AttachSpec":

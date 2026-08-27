@@ -16,7 +16,7 @@ def agent(agent_id, available=True, argv=None, reason=None, context_id="h1"):
         "attach": {
             "available": available,
             "argv": argv or (["echo", "hi"] if available else None),
-            "argv_readwrite": None,
+            "argv_readonly": None,
             "reason": reason,
         },
     }
@@ -69,49 +69,43 @@ class ResolveAttachTest(unittest.TestCase):
         self.assertEqual(params, ["agent_id"])
 
 
-class ReadWriteResolutionTest(unittest.TestCase):
-    """Read-only is a property of the tmux client, so switching modes means
-    replacing the session with the read-write argv."""
+class ReadOnlyPolicyTest(unittest.TestCase):
+    """Read-only is a hub-wide deployment choice (--read-only), not a per-session
+    toggle. A terminal should behave like a terminal by default."""
 
     def setUp(self):
-        registry = Registry()
-        ro_rw = {
+        self.registry = Registry()
+        self.registry.ingest(snapshot("h1", [{
             "id": "h1:x:both", "name": "both", "status": "idle", "context_id": "h1",
-            "attach": {"available": True, "argv": ["tmux", "attach", "-r", "-t", "s"],
-                       "argv_readwrite": ["tmux", "attach", "-t", "s"], "reason": None},
-        }
-        ro_only = {
-            "id": "h1:x:ro", "name": "ro", "status": "idle", "context_id": "h1",
-            "attach": {"available": True, "argv": ["tmux", "attach", "-r", "-t", "s"],
-                       "argv_readwrite": None, "reason": None},
-        }
-        registry.ingest(snapshot("h1", [ro_rw, ro_only]))
-        self.state = HubState(registry, token=None, local_context_id="h1")
+            "attach": {"available": True,
+                       "argv": ["tmux", "attach", "-t", "s"],
+                       "argv_readonly": ["tmux", "attach", "-r", "-t", "s"],
+                       "reason": None},
+        }]))
 
-    def test_readwrite_argv_drops_the_read_only_flag(self):
-        argv, error = self.state.resolve_attach_rw("h1:x:both")
+    def test_default_attach_accepts_input(self):
+        state = HubState(self.registry, token=None, local_context_id="h1")
+        argv, error = state.resolve_attach("h1:x:both")
         self.assertIsNone(error)
         self.assertNotIn("-r", argv)
 
-    def test_default_argv_keeps_it(self):
-        argv, _ = self.state.resolve_attach("h1:x:both")
+    def test_read_only_hub_uses_the_read_only_argv(self):
+        state = HubState(self.registry, token=None, local_context_id="h1",
+                         allow_input=False)
+        argv, _ = state.resolve_attach("h1:x:both")
         self.assertIn("-r", argv)
 
-    def test_agent_without_a_readwrite_argv_is_refused(self):
-        argv, error = self.state.resolve_attach_rw("h1:x:ro")
-        self.assertIsNone(argv)
-        self.assertIn("cannot accept input", error)
-
-    def test_readwrite_still_refuses_a_remote_agent(self):
+    def test_read_only_hub_falls_back_when_no_variant_exists(self):
         registry = Registry()
-        registry.ingest(snapshot("h2", [{
-            "id": "h2:x:r", "name": "r", "status": "idle", "context_id": "h2",
-            "attach": {"available": True, "argv": ["tmux"], "argv_readwrite": ["tmux"],
-                       "reason": None},
+        registry.ingest(snapshot("h1", [{
+            "id": "h1:x:only", "name": "only", "status": "idle", "context_id": "h1",
+            "attach": {"available": True, "argv": ["tmux", "attach", "-t", "s"],
+                       "argv_readonly": None, "reason": None},
         }]))
-        state = HubState(registry, token=None, local_context_id="h1")
-        _, error = state.resolve_attach_rw("h2:x:r")
-        self.assertIn("another machine", error)
+        state = HubState(registry, token=None, local_context_id="h1", allow_input=False)
+        argv, error = state.resolve_attach("h1:x:only")
+        self.assertIsNone(error)
+        self.assertEqual(argv, ["tmux", "attach", "-t", "s"])
 
 
 class PtySessionTest(unittest.TestCase):

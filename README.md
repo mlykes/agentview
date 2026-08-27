@@ -55,8 +55,10 @@ python3 -m agentview.collector --hub http://<hub-host>:7788 --token <token> \
 
 Click any attachable agent and its own terminal opens in the browser — agentview does
 not parse or re-render transcripts, it attaches to the session the harness is already
-drawing. Read-only by default; input is a deliberate per-session toggle, because typing
-into a running agent by accident is a real way to derail it.
+drawing. It is a normal terminal: it takes input, follows your window size, and behaves
+like the terminal you would otherwise have run the agent in. Start the hub with
+`--read-only` if you want a monitoring-only deployment; that is enforced by tmux,
+server-side.
 
 Supported today:
 - **Claude Code** — rich adapter reading its session registry

@@ -83,25 +83,32 @@ and remote agents alike.
 |---|---|---|
 | `available` | bool | |
 | `reason` | string \| null | Why not. **Always set when unavailable** — the UI shows it |
-| `argv` | string[] \| null | Yields a PTY; read-only by default |
-| `argv_readwrite` | string[] \| null | Used only when the user toggles input on |
+| `argv` | string[] \| null | Normal interactive attach — the default |
+| `argv_readonly` | string[] \| null | Used only when the hub runs with `--read-only` |
 
 | Context | argv |
 |---|---|
-| local | `tmux attach -r -t <session>` |
-| container | `docker exec -it <cid> tmux attach -r -t <session>` |
-| remote | `ssh <host> -t tmux attach -r -t <session>` |
+| local | `tmux attach -t <session>` |
+| container | `docker exec -it <cid> tmux attach -t <session>` |
+| remote | `ssh <host> -t tmux attach -t <session>` |
 
 **The hub reads argv from the registry, never from the request.** A client-supplied
 command would be arbitrary execution behind a loopback port. `resolve_attach()` takes
 an agent id and nothing else.
 
-**Read-only is enforced by `tmux attach -r`, server-side** — not by the browser
-declining to send keystrokes. Terminal protocol replies (DA, OSC colour queries,
-cursor reports) travel the same path as keystrokes and tmux waits on them before it
-will paint, so filtering client-side would be both weaker and visibly broken.
-Switching modes replaces the tmux client, since read-only is a property of that
-client; the browser reopens its stream afterwards.
+**The terminal is a normal terminal.** It accepts input, because a viewer who opens
+one generally wants to use it, and anything less stops it behaving like the terminal
+you would otherwise have run the agent in. A hub started with `--read-only` attaches
+with `tmux attach -r` instead — a deployment-wide choice, enforced server-side by
+tmux rather than by the browser declining to send keystrokes.
+
+There was briefly a per-session "allow input" toggle. It was removed: read-only is a
+property of the tmux client, so flipping it meant tearing down and restarting the
+client, which reset the terminal to a fixed size and visibly resized the window.
+Complexity that made the terminal behave *less* like a terminal.
+
+**The session is resized on every connect**, so it matches the window that opened it
+rather than whichever window opened it first.
 
 Only agents in the hub's own context can be attached to today. The argv is written for
 the collector's machine, so running a remote one locally would attach to the wrong box.
@@ -135,7 +142,6 @@ genuinely idle one. A failing adapter produces a warning, never a crash.
 | `GET /v1/attach/{id}/stream` | browser → hub | **SSE** stream of terminal output |
 | `POST /v1/attach/{id}/input` | browser → hub | Bytes toward the PTY |
 | `POST /v1/attach/{id}/resize` | browser → hub | `{"cols": n, "rows": n}` |
-| `POST /v1/attach/{id}/mode` | browser → hub | `{"input": bool}` — swap read-only/read-write |
 | `POST /v1/attach/{id}/close` | browser → hub | Tear the session down |
 | `GET /v1/health` | anyone | Liveness; the only unauthenticated `/v1` route |
 

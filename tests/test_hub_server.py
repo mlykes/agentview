@@ -139,7 +139,7 @@ class StreamFramingTest(ServerTestBase):
             "agents": [{
                 "id": "h1:x:s", "name": "s", "status": "idle", "context_id": "h1",
                 "attach": {"available": True, "argv": ["sh", "-c", "echo hi; sleep 5"],
-                           "argv_readwrite": None, "reason": None},
+                           "argv_readonly": None, "reason": None},
             }],
             "warnings": [], "collected_at": 0,
         })
@@ -183,24 +183,37 @@ class EncodedAgentIdTest(ServerTestBase):
             "agents": [{
                 "id": "h1:x:enc", "name": "enc", "status": "idle", "context_id": "h1",
                 "attach": {"available": True, "argv": ["sh", "-c", "sleep 5"],
-                           "argv_readwrite": ["sh", "-c", "sleep 5"], "reason": None},
+                           "argv_readonly": ["sh", "-c", "sleep 5"], "reason": None},
             }],
             "warnings": [], "collected_at": 0,
         })
         encoded = urllib.parse.quote("h1:x:enc", safe="")
-        # /mode resolves the agent through the registry, so a missed decode surfaces
-        # as "no such agent" rather than being masked by a "no live terminal" 404.
-        request = urllib.request.Request(
-            self.base + "/v1/attach/" + encoded + "/mode",
-            data=b'{"input": false}',
-            headers={"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"},
-            method="POST",
+
+        # Start the terminal first via the (encoded) stream route, so a "no live
+        # terminal" 404 cannot mask a decode miss on the POST route.
+        import socket
+
+        sock = socket.create_connection(("127.0.0.1", self.httpd.server_address[1]), timeout=6)
+        sock.sendall(
+            ("GET /v1/attach/%s/stream HTTP/1.1\r\nHost: x\r\n" % encoded).encode()
+            + b"Authorization: Bearer " + TOKEN.encode() + b"\r\n\r\n"
         )
+        sock.recv(256)
         try:
-            with urllib.request.urlopen(request, timeout=8) as response:
-                status, body = response.status, response.read().decode()
-        except urllib.error.HTTPError as exc:
-            status, body = exc.code, exc.read().decode()
+            request = urllib.request.Request(
+                self.base + "/v1/attach/" + encoded + "/resize",
+                data=b'{"cols": 90, "rows": 30}',
+                headers={"Authorization": "Bearer " + TOKEN,
+                         "Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    status, body = response.status, response.read().decode()
+            except urllib.error.HTTPError as exc:
+                status, body = exc.code, exc.read().decode()
+        finally:
+            sock.close()
         self.assertNotIn("no such agent", body)
         self.assertEqual(status, 200, body)
 
