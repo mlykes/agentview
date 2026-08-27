@@ -37,9 +37,19 @@ Nothing phones home. Nothing needs a package registry at install time.
 No install, no dependencies, no internet:
 
 ```bash
-git clone <this repo> && cd agentview
-python3 -m agentview.hub
+git clone https://github.com/mlykes/agentview && cd agentview
+python3 -m agentview hub
 ```
+
+No install step. If you want `agentview` on your PATH, symlink the launcher — it
+resolves its own location, so it works from any directory:
+
+```bash
+ln -s "$PWD/bin/agentview" ~/.local/bin/agentview
+```
+
+Everything below can be written either way: `python3 -m agentview <cmd>` from a
+checkout, or `agentview <cmd>` once symlinked.
 
 The hub prints a URL with an auth token — open it. It collects from the machine it runs
 on automatically. To report a *different* machine or container into the same HUD:
@@ -48,6 +58,9 @@ on automatically. To report a *different* machine or container into the same HUD
 python3 -m agentview.collector --hub http://<hub-host>:7788 --token <token> \
     --parent <hub-machine-context-id>      # so it nests under its host
 ```
+
+(The collector keeps its own `-m agentview.collector` entry point: it is the piece you
+copy to a locked-down machine on its own, and it must run with nothing else present.)
 
 ## Status
 
@@ -72,8 +85,8 @@ You cannot attach to the PTY of a process started outside a multiplexer — that
 fact, not something agentview can engineer around. So launch agents through the shim:
 
 ```bash
-agentview run -- claude
-agentview run --name api -- opencode
+python3 -m agentview run -- claude
+python3 -m agentview run --name api -- opencode
 ```
 
 Agents started normally still appear in the HUD; their terminal view is disabled with an

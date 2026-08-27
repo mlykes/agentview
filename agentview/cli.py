@@ -13,6 +13,10 @@ usage:
   agentview hub                   serve the HUD
 
 Run `agentview <command> --help` for options.
+
+No install needed. Either of these works from a checkout:
+  python3 -m agentview <command>
+  ./bin/agentview <command>          (symlink it onto your PATH if you like)
 """
 
 
