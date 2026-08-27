@@ -26,6 +26,59 @@ from agentview.collector import tmux
 
 SESSION_PREFIX = "agentview"
 
+#: Environment variables that identify a *parent* agent session. They must not reach
+#: a newly launched agent: a child that inherits them adopts the parent's identity --
+#: it registers under the parent's name, and in Claude Code's case also inherits the
+#: parent's messaging socket and token. Since the natural way to try `agentview run`
+#: is from inside an agent, this would be the common case rather than an edge case.
+STRIP_PREFIXES = (
+    "CLAUDE_CODE_",
+    "OPENCODE_",
+    "AIDER_",
+    "GOOSE_SESSION",
+    "CODEX_SESSION",
+)
+STRIP_EXACT = frozenset({
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_JOB_DIR",
+    "AI_AGENT",
+    "TMUX",          # nesting a client inside its own server
+    "TMUX_PANE",
+})
+#: Kept even though it matches a prefix above: it points at a config directory the
+#: user chose, not at a session.
+KEEP = frozenset({"CLAUDE_CONFIG_DIR"})
+
+
+def inherited_session_vars(environ=None):
+    """Parent-session variables present in this environment, sorted."""
+    environ = os.environ if environ is None else environ
+    found = set()
+    for name in environ:
+        if name in KEEP:
+            continue
+        if name in STRIP_EXACT or name.startswith(STRIP_PREFIXES):
+            found.add(name)
+    return sorted(found)
+
+
+def sanitize(command, environ=None):
+    """Prefix a command with `env -u ...` for every inherited session variable.
+
+    Done with `env` rather than by passing a cleaned environment to tmux, because
+    tmux hands the child the *server's* environment when a server is already
+    running -- so cleaning our own would not reach the agent.
+    """
+    strip = inherited_session_vars(environ)
+    if not strip:
+        return list(command)
+    prefix = ["env"]
+    for name in strip:
+        prefix += ["-u", name]
+    return prefix + list(command)
+
 
 def slugify(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-").lower()
@@ -83,7 +136,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # -A would attach to an existing session of the same name; we picked a unique one
     # above so each launch is its own session.
-    create = ["tmux", "new-session", "-d", "-s", session, "-n", slugify(name)] + command
+    launched = sanitize(command)
+    stripped = inherited_session_vars()
+    if stripped:
+        print(
+            "clearing {} inherited session variable(s) so this agent starts as itself"
+            .format(len(stripped)),
+            file=sys.stderr,
+        )
+    create = ["tmux", "new-session", "-d", "-s", session, "-n", slugify(name)] + launched
     try:
         result = subprocess.run(create, capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError) as exc:

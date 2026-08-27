@@ -77,6 +77,12 @@ agentview run --name api -- opencode
 Agents started normally still appear in the HUD; their terminal view is disabled with an
 explicit reason rather than silently doing nothing.
 
+`agentview run` clears the environment variables that identify a *parent* agent session
+before launching. Without that, an agent started from inside another agent inherits its
+parent's session id — and, for Claude Code, its messaging socket and token — and
+registers under the parent's name. Since launching from inside an agent is the obvious
+way to try this, that was the common case rather than an edge case.
+
 ## Zero dependencies, by hard requirement
 
 **Both the collector and the hub** are stdlib-only — enforced in CI against a bare
