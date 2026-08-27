@@ -81,6 +81,10 @@ Supported today:
 
 ## Attaching to an agent
 
+Opening a terminal splits the view rather than covering it: the agent list stays on the
+left, so you can see everything running while you drive one of them, and clicking
+another agent switches the terminal.
+
 Click **+ new agent** in the HUD. It lists the agent CLIs actually installed on that
 machine, starts the one you pick under tmux, and opens its terminal as soon as it
 registers. No command to type, no terminal to go find.

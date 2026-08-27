@@ -68,7 +68,30 @@ body {
 .conn.ok .conn-dot { background: var(--busy); }
 .conn.bad .conn-dot { background: var(--stuck); }
 
-main { padding: 20px 22px 40px; max-width: 1180px; margin: 0 auto; }
+.workspace {
+  display: flex; align-items: stretch; gap: 14px;
+  padding: 16px 18px 24px;
+  max-width: 1600px; margin: 0 auto;
+  /* Fill the viewport under the sticky header so the terminal has real height. */
+  height: calc(100vh - 53px);
+}
+main { flex: 1 1 auto; min-width: 0; overflow-y: auto; }
+
+/* With a terminal open the list becomes a column instead of vanishing -- the whole
+   point of a HUD is seeing everything at once. */
+body.with-terminal main { flex: 0 0 340px; max-width: 340px; }
+body.with-terminal .ctx-meta,
+body.with-terminal .detail,
+body.with-terminal .no-attach,
+body.with-terminal .attach-hint,
+body.with-terminal .agent .right { display: none; }
+body.with-terminal .agent {
+  grid-template-columns: 16px 1fr;
+  padding: 7px 12px;
+}
+body.with-terminal .badge { display: none; }
+body.with-terminal .cwd { display: none; }
+body.with-terminal .ctx-head { padding: 8px 12px; }
 
 .ctx { margin-bottom: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
 .ctx-head {
@@ -120,7 +143,9 @@ main { padding: 20px 22px 40px; max-width: 1180px; margin: 0 auto; }
 
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
 .warnings { padding: 8px 15px; font-size: 12px; color: var(--blocked); border-top: 1px solid var(--line-2); }
-.footer { padding: 0 22px 26px; max-width: 1180px; margin: 0 auto; color: var(--ink-3); font-size: 12px; }
+.footer { padding: 0 22px 22px; max-width: 1600px; margin: 0 auto; color: var(--ink-3); font-size: 12px; }
+/* The split view already fills the viewport; the note would push it into a scroll. */
+body.with-terminal .footer { display: none; }
 
 @media (max-width: 720px) {
   .agent { grid-template-columns: 16px 1fr; }
@@ -137,18 +162,11 @@ main { padding: 20px 22px 40px; max-width: 1180px; margin: 0 auto; }
   font-size: 11px; color: var(--accent);
 }
 
-.term-overlay {
-  position: fixed; inset: 0; z-index: 50;
-  background: rgba(6, 9, 14, .55);
-  display: flex; align-items: center; justify-content: center;
-  /* Close to full-bleed: this is a terminal, and cramming it into a small modal
-     is the fastest way to make it not feel like one. */
-  padding: 2vh 2vw;
-}
-.term-overlay[hidden] { display: none; }
+.term-dock { flex: 1 1 auto; min-width: 0; display: flex; }
+.term-dock[hidden] { display: none; }
 .term-panel {
   display: flex; flex-direction: column;
-  width: 100%; max-width: 1600px; height: 100%;
+  width: 100%; height: 100%; min-width: 0;
   background: #0b0e13; color: #e7edf5;
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
   box-shadow: 0 24px 60px rgba(0,0,0,.45);
@@ -168,7 +186,13 @@ main { padding: 20px 22px 40px; max-width: 1180px; margin: 0 auto; }
   cursor: pointer; padding: 0 4px;
 }
 .term-close:hover { color: #e7edf5; }
-.term-body { flex: 1 1 auto; min-height: 0; padding: 6px 8px; background: #0b0e13; }
+.term-body {
+  flex: 1 1 auto; min-height: 0; background: #0b0e13;
+  /* Extra right padding reserves room for xterm's scrollbar. The fit addon measures
+     this container, so without the reservation it computes a couple of columns more
+     than actually fit and long lines wrap early. */
+  padding: 6px 18px 6px 8px;
+}
 .term-foot {
   flex: 0 0 auto; padding: 7px 13px; font-size: 11px; color: #7d8a9c;
   border-top: 1px solid #222a35; background: #101620;
@@ -200,3 +224,28 @@ main { padding: 20px 22px 40px; max-width: 1180px; margin: 0 auto; }
 }
 .launch-menu button:hover { background: var(--badge-bg); }
 .launch-menu .none { padding: 8px 10px; color: var(--ink-3); font-size: 12px; }
+
+
+/* the row whose terminal is open */
+.agent.active { background: var(--badge-bg); }
+.agent.active .name { color: var(--accent); }
+
+@media (max-width: 900px) {
+  .workspace { flex-direction: column; height: auto; }
+  body.with-terminal main { flex: 0 0 auto; max-width: none; }
+  .term-dock { height: 70vh; }
+}
+
+
+/* xterm's scrollbar appears once there is scrollback, which steals width *after*
+   the fit addon has measured -- so the terminal ends up a few columns too wide and
+   wraps early. Reserving the gutter keeps the measurement stable whether or not
+   content is currently overflowing. (Invisible on macOS, where scrollbars overlay.) */
+.term-body .xterm-viewport {
+  scrollbar-width: thin;
+}
+.term-body .xterm-viewport::-webkit-scrollbar { width: 10px; }
+.term-body .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #2b3442; border-radius: 5px;
+}
+.term-body .xterm-viewport::-webkit-scrollbar-track { background: transparent; }

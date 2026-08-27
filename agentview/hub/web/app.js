@@ -54,7 +54,8 @@
 
   function agentRow(agent) {
     var attachable = agent.attach && agent.attach.available;
-    var row = el("div", "agent" + (attachable ? " attachable" : ""));
+    var isOpen = current && current.id === agent.id;
+    var row = el("div", "agent" + (attachable ? " attachable" : "") + (isOpen ? " active" : ""));
     if (attachable) {
       row.title = "open this agent's terminal";
       row.addEventListener("click", function () { openTerminal(agent); });
@@ -278,6 +279,7 @@
   /* --- terminal ------------------------------------------------------- */
 
   var term = null, fit = null, stream = null, current = null, streamLive = false;
+  var resizeObserver = null;
   var overlay = document.getElementById("term-overlay");
   var body = document.getElementById("term-body");
   var foot = document.getElementById("term-foot");
@@ -302,10 +304,13 @@
   }
 
   function openTerminal(agent) {
+    if (current && current.id === agent.id) return;   // already showing this one
     closeTerminal();
     current = agent;
     streamLive = false;
+    lastSize = "";
     overlay.hidden = false;
+    document.body.classList.add("with-terminal");
     document.getElementById("term-title").textContent = agent.name;
     document.getElementById("term-sub").textContent =
       (agent.harness_label || agent.harness) + "  ·  " + (agent.cwd || "");
@@ -330,7 +335,17 @@
       term.loadAddon(fit);
     } catch (e) { fit = null; }
     term.open(body);
+    // The list narrows as the dock appears, so the container's final width is not
+    // known yet. Observe it instead of guessing when layout has settled -- guessing
+    // left the terminal sized for the pre-split width and clipped on the right.
     doFit();
+    if (window.ResizeObserver) {
+      resizeObserver = new ResizeObserver(function () { doFit(); });
+      resizeObserver.observe(body);
+    } else {
+      requestAnimationFrame(doFit);
+      setTimeout(doFit, 120);
+    }
 
     // Everything xterm emits is forwarded, including the protocol replies tmux
     // waits on before it will paint. Read-only is enforced by the session running
@@ -369,7 +384,12 @@
         // and agent TUIs are full of box-drawing characters. xterm.js accepts a
         // Uint8Array and does the decoding itself, including across chunk splits.
         term.write(b64bytes(ev.data));
-        if (!streamLive) { streamLive = true; setFoot(null, true); }
+        if (!streamLive) {
+          streamLive = true;
+          setFoot(null, true);
+          // First content can introduce a scrollbar; re-measure once it has.
+          requestAnimationFrame(doFit);
+        }
       } catch (e) { /* skip bad frame */ }
     };
     stream.addEventListener("end", function () {
@@ -387,15 +407,21 @@
         setFoot("reconnecting…", false);
       }
     };
-    setFoot(null, false);
+    if (!streamLive) setFoot(null, false);   // the seed may already have connected us
     term.focus();
   }
+
+  var lastSize = "";
 
   function doFit() {
     if (!fit || !term) return;
     try {
       fit.fit();
-      if (current) {
+      var size = term.cols + "x" + term.rows;
+      // The observer fires repeatedly during layout; only tell the PTY when the
+      // size actually changed.
+      if (current && size !== lastSize) {
+        lastSize = size;
         api("/v1/attach/" + encodeURIComponent(current.id) + "/resize",
             { cols: term.cols, rows: term.rows });
       }
@@ -408,15 +434,20 @@
   }
 
   function closeTerminal() {
+    if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
     if (stream) { stream.close(); stream = null; }
     if (term) { term.dispose(); term = null; }
     fit = null;
     body.textContent = "";
     overlay.hidden = true;
+    document.body.classList.remove("with-terminal");
     current = null;
   }
 
-  document.getElementById("term-close").addEventListener("click", closeTerminal);
+  document.getElementById("term-close").addEventListener("click", function () {
+    closeTerminal();
+    tick();   // repaint the list at full width and drop the active highlight
+  });
   overlay.addEventListener("click", function (e) {
     if (e.target === overlay) closeTerminal();
   });

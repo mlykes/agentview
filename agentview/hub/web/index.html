@@ -22,29 +22,31 @@
   <div class="conn" id="conn"><span class="conn-dot"></span><span id="conn-text">connecting</span></div>
 </header>
 
-<main id="root">
-  <div class="empty" id="boot">Loading…</div>
-</main>
+<div class="workspace">
+  <main id="root">
+    <div class="empty" id="boot">Loading…</div>
+  </main>
+
+  <section class="term-dock" id="term-overlay" hidden>
+    <div class="term-panel">
+      <div class="term-head">
+        <span class="term-dot" id="term-dot"></span>
+        <span class="term-title" id="term-title">terminal</span>
+        <span class="term-sub" id="term-sub"></span>
+        <span class="term-state" id="term-state"></span>
+        <button class="term-close" id="term-close" title="close (esc)">&times;</button>
+      </div>
+      <div class="term-body" id="term-body"></div>
+      <div class="term-foot" id="term-foot">connecting…</div>
+    </div>
+  </section>
+</div>
 
 <footer class="footer">
   <span id="footer-note">Presence is read from each harness on disk. Agents started with
   <b>+ new agent</b> run under tmux and open a live terminal here; agents started elsewhere
   can be watched but not attached to, since a PTY cannot be added to a running process.</span>
 </footer>
-
-<div class="term-overlay" id="term-overlay" hidden>
-  <div class="term-panel">
-    <div class="term-head">
-      <span class="term-dot" id="term-dot"></span>
-      <span class="term-title" id="term-title">terminal</span>
-      <span class="term-sub" id="term-sub"></span>
-      <span class="term-state" id="term-state"></span>
-      <button class="term-close" id="term-close" title="close (esc)">&times;</button>
-    </div>
-    <div class="term-body" id="term-body"></div>
-    <div class="term-foot" id="term-foot">connecting…</div>
-  </div>
-</div>
 
 <!--BOOTSTRAP-->
 <script src="/static/vendor/xterm.js"></script>
