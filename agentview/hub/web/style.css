@@ -199,6 +199,12 @@ body.with-terminal .dir-head { padding: 6px 12px; }
 }
 .agent:hover .swatch, .swatch:focus { opacity: 1; }
 .swatch.none { border-style: dashed; border-color: var(--ink-3); }
+
+/* Machine heading in the launch menu; only shown when there is more than one. */
+.menu-head {
+  padding: 6px 10px 2px; font-size: 11px; font-weight: 620;
+  color: var(--ink-3); text-transform: lowercase;
+}
 /* Queued to be typed into the session the next time its terminal is open. */
 .swatch.pending { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--ink-3); }
 

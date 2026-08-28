@@ -37,6 +37,7 @@ from agentview import harnesses
 from agentview import runner
 from agentview.hub.ptys import PtyManager
 from agentview.hub.overrides import COLOURS, Overrides
+from agentview.hub import remotes as remotes_mod
 from agentview.hub.registry import Registry
 
 WEB_ROOT = Path(__file__).parent / "web"
@@ -147,6 +148,10 @@ class HubState:
         #: Editing a row mutates hub-side state, so a read-only hub refuses it for
         #: the same reason it refuses launching.
         self.can_edit = allow_input and overrides is not None
+        #: host -> {"harnesses": {command: path}, "context_id": ..., "error": ...}.
+        #: Filled in by the remote poll loop; read when listing launch targets and
+        #: when resolving a command to start there.
+        self.remotes: Dict[str, Dict[str, Any]] = {}
 
     def resolve_attach(self, agent_id: str):
         """(argv, error) for an agent, enforcing what this hub can actually reach.
@@ -161,6 +166,14 @@ class HubState:
         if not attach.get("available"):
             return None, attach.get("reason") or "attach unavailable for this agent"
         context_id = agent.get("context_id")
+        # An agent on a remote host is reachable when its argv already goes through
+        # ssh -- the collector's own argv was rewritten at ingest for exactly this.
+        if agent.get("ssh_host"):
+            key = "argv" if self.allow_input else "argv_readonly"
+            argv = attach.get(key) or attach.get("argv")
+            if not argv or not isinstance(argv, list):
+                return None, "no attach command reported"
+            return argv, None
         if self.local_context_id and context_id != self.local_context_id:
             # The argv is written for the collector's machine. Running it here would
             # attach to the wrong box, or to nothing. Remote attach needs the hub to
@@ -273,6 +286,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/v1/harnesses":
             return self._json(200, {"harnesses": available_harnesses(),
+                                    "targets": self._launch_targets(),
                                     "can_launch": self.state.can_launch,
                                     "can_edit": self.state.can_edit,
                                     "colours": list(COLOURS)})
@@ -308,9 +322,33 @@ class Handler(BaseHTTPRequestHandler):
             if not self.state.can_launch:
                 return self._json(403, {"error": "launching is disabled on this hub"})
             requested = str(payload.get("harness") or "")
-            # The command is resolved from the server's own harness table. The browser
-            # names a harness; it never supplies a command, or this would be arbitrary
-            # execution behind a loopback port.
+            host = payload.get("host") or None
+            # The command is resolved from the server's own table -- the local one, or
+            # what was probed on that remote. The browser names a harness and a host;
+            # it never supplies a command, or this would be arbitrary execution behind
+            # a loopback port, on someone else's machine as well as this one.
+            if host:
+                if host not in self.state.remotes:
+                    return self._json(400, {"error": "unknown host"})
+                target = next(
+                    (t for t in self._launch_targets() if t["host"] == host), None
+                )
+                match = next(
+                    (h for h in (target or {}).get("harnesses", [])
+                     if h["harness"] == requested),
+                    None,
+                )
+                if match is None:
+                    return self._json(
+                        400, {"error": "harness not installed on " + host}
+                    )
+                name = str(payload.get("name") or "").strip() or match["harness"]
+                session = runner.unique_session_name(name)
+                error = remotes_mod.launch(host, match["command"], session)
+                if error:
+                    return self._json(500, {"error": error})
+                return self._json(200, {"ok": True, "session": session,
+                                        "harness": match["harness"], "host": host})
             match = next(
                 (h for h in available_harnesses() if h["harness"] == requested), None
             )
@@ -466,6 +504,40 @@ class Handler(BaseHTTPRequestHandler):
             session.unsubscribe(sub_id)
             self._sse_end()
 
+    def _launch_targets(self):
+        """Where a new agent can be started, and what is installed there.
+
+        A remote's list is probed on the far side rather than assumed to match this
+        machine's -- they rarely do, and offering a harness that is not installed
+        would fail only once the user had already chosen it.
+        """
+        table = harnesses.load()
+        targets = [{
+            "host": None,
+            "label": "this machine",
+            "harnesses": available_harnesses(),
+        }]
+        for host, info in sorted(self.state.remotes.items()):
+            found = info.get("harnesses") or {}
+            seen, entries = set(), []
+            for command, path in sorted(found.items()):
+                identity = table.get(command)
+                if not identity or identity["harness"] in seen:
+                    continue
+                seen.add(identity["harness"])
+                entries.append({
+                    "harness": identity["harness"],
+                    "label": identity["label"],
+                    "command": path,
+                })
+            targets.append({
+                "host": host,
+                "label": host,
+                "harnesses": entries,
+                "error": info.get("error"),
+            })
+        return targets
+
     def _push_colour(self, agent_id: str, session) -> None:
         """Type `/color` into a session agentview was told to recolour."""
         if self.state.overrides is None:
@@ -578,11 +650,57 @@ def local_collector_loop(registry: Registry, interval: float, label, parent) -> 
         time.sleep(interval)
 
 
+def remote_collector_loop(state: "HubState", host: str, interval: float) -> None:
+    """Poll one SSH host by running the collector there.
+
+    The collector is copied over on the first tick and after any failure that looks
+    like it went missing, so a remote that is rebooted or cleaned up heals itself
+    without anyone logging in.
+    """
+    synced = False
+    while True:
+        try:
+            if not synced:
+                error = remotes_mod.sync_code(host)
+                if error:
+                    state.remotes.setdefault(host, {})["error"] = error
+                    time.sleep(max(interval, 10.0))
+                    continue
+                synced = True
+
+            snapshot, error = remotes_mod.collect_once(host)
+            info = state.remotes.setdefault(host, {})
+            if error:
+                info["error"] = error
+                # Most likely the copy is gone or half-written; send it again.
+                synced = False
+            else:
+                info["error"] = None
+                info["context_id"] = (snapshot.get("context") or {}).get("id")
+                state.registry.ingest(remotes_mod.rewrite_for_ssh(snapshot, host))
+                found, herr = remotes_mod.remote_harnesses(
+                    host, sorted(harnesses.load().keys())
+                )
+                if not herr:
+                    info["harnesses"] = found
+        except Exception as exc:  # noqa: BLE001 - one bad host must not kill the hub
+            state.remotes.setdefault(host, {})["error"] = str(exc)
+        time.sleep(interval)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m agentview.hub")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback)")
     parser.add_argument("--port", type=int, default=7788)
     parser.add_argument("--interval", type=float, default=3.0, help="local collector tick")
+    parser.add_argument(
+        "--remote", action="append", default=[], metavar="HOST",
+        help="watch an ssh host (repeatable); remembered in ~/.agentview/remotes.json",
+    )
+    parser.add_argument(
+        "--remote-interval", type=float, default=6.0,
+        help="how often to poll each ssh host",
+    )
     parser.add_argument("--no-local", action="store_true", help="do not collect from this machine")
     parser.add_argument("--no-auth", action="store_true", help="disable the token (loopback only)")
     parser.add_argument("--token", default=None, help="use this token instead of ~/.agentview/token")
@@ -639,6 +757,18 @@ def main(argv=None) -> int:
             daemon=True,
         )
         thread.start()
+
+    hosts = remotes_mod.load_remotes(args.remote)
+    if args.remote:
+        # Naming a host on the command line is also how you add one for good.
+        remotes_mod.save_remotes(hosts)
+    for host in hosts:
+        Handler.state.remotes.setdefault(host, {})
+        threading.Thread(
+            target=remote_collector_loop,
+            args=(Handler.state, host, args.remote_interval),
+            daemon=True,
+        ).start()
 
     try:
         httpd = ThreadingHTTPServer((args.host, args.port), Handler)

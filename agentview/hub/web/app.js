@@ -433,24 +433,43 @@
         if (!data.can_launch) return;
         launchWrap.hidden = false;
         launchMenu.textContent = "";
-        if (!data.harnesses.length) {
-          launchMenu.appendChild(el("div", "none", "no agent CLIs found on PATH"));
-          return;
-        }
-        data.harnesses.forEach(function (h) {
-          var item = el("button", null, h.label);
-          item.addEventListener("click", function () { launch(h); });
-          launchMenu.appendChild(item);
+        // One section per machine. With no remotes configured there is exactly one,
+        // and its heading is dropped so the menu looks as it always did.
+        var targets = data.targets || [{ host: null, label: "this machine",
+                                         harnesses: data.harnesses || [] }];
+        var many = targets.length > 1;
+        var offered = 0;
+        targets.forEach(function (target) {
+          if (many) launchMenu.appendChild(el("div", "menu-head", target.label));
+          if (target.error) {
+            launchMenu.appendChild(el("div", "none", target.error));
+            return;
+          }
+          if (!target.harnesses.length) {
+            launchMenu.appendChild(el("div", "none", "no agent CLIs installed"));
+            return;
+          }
+          target.harnesses.forEach(function (h) {
+            var item = el("button", null, h.label);
+            item.addEventListener("click", function () { launch(h, target.host); });
+            launchMenu.appendChild(item);
+            offered += 1;
+          });
         });
+        if (!offered && !many) {
+          launchMenu.textContent = "";
+          launchMenu.appendChild(el("div", "none", "no agent CLIs found on PATH"));
+        }
       })
       .catch(function () { /* launching stays hidden */ });
   }
 
-  function launch(harness) {
+  function launch(harness, host) {
     launchMenu.hidden = true;
     launchBtn.disabled = true;
-    launchBtn.textContent = "starting " + harness.label + "…";
-    api("/v1/launch", { harness: harness.harness })
+    launchBtn.textContent = "starting " + harness.label
+      + (host ? " on " + host : "") + "…";
+    api("/v1/launch", { harness: harness.harness, host: host || null })
       .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) {
         if (!res.ok) throw new Error(res.body.error || "could not start it");

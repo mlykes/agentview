@@ -125,6 +125,49 @@ parent's session id — and, for Claude Code, its messaging socket and token —
 registers under the parent's name. Since launching from inside an agent is the obvious
 way to try this, that was the common case rather than an edge case.
 
+## Remote machines
+
+Name an SSH host and it appears in the HUD:
+
+```bash
+python3 -m agentview hub --remote pronto_server
+```
+
+That is the whole setup. The host is remembered in `~/.agentview/remotes.json`, so
+later runs just work.
+
+**Nothing is installed on the remote.** The hub sends its own collector over the SSH
+connection you already have — about 20KB, gzipped in memory — unpacks it under
+`~/.agentview/code`, and runs it there. No package registry, no internet, no port
+opened on the far side, nothing for an IT department to approve. It is re-sent
+automatically if it ever goes missing, so a rebuilt box heals itself.
+
+The host is whatever you would type after `ssh`, so an alias from `~/.ssh/config`
+works and brings its `User`, `IdentityFile` and `ProxyJump` with it.
+
+Three things work across the connection:
+
+| | |
+|---|---|
+| **seeing agents** | the collector runs there each tick; its snapshot is merged into the HUD |
+| **starting agents** | **+ new agent** lists each machine and what is installed *on that machine* |
+| **opening a terminal** | attach becomes `ssh <host> -t tmux attach -t <session>` |
+
+The context is labelled with the name you typed rather than the machine's own
+hostname — a work box is often called something like `SPU5-1-2-7-61358`, which is not
+how you think of it.
+
+**Everything runs through a login shell**, which is not a detail. SSH hands out a
+non-login PATH — on a stock Debian box `/usr/local/bin:/usr/bin:/bin:/usr/games` —
+while Claude Code installs to `~/.local/bin`. Probing without `bash -l` reports a
+perfectly good install as missing, and the launch menu comes back empty.
+
+What does *not* work remotely is attaching to a background agent. `claude attach`
+reaches a session over a unix socket on its own machine, and that socket is not
+exposed across SSH, so those rows say so rather than offering a button that would run
+the command against a job id on the wrong box. Remote agents started through
+agentview run under tmux and attach normally.
+
 ## Reading the list
 
 **Agents are grouped by working directory.** "What is running in this repo" is the
