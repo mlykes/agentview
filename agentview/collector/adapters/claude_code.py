@@ -19,9 +19,12 @@ from __future__ import annotations
 import glob
 import json
 import os
+import shlex
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from agentview.collector import tmux as tmux_mod
 from agentview.collector.adapters.base import Adapter
 from agentview.collector.procs import pid_matches, process_table
 from agentview.model import (
@@ -108,6 +111,51 @@ def _last_timeline_event(job_dir: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
+#: Stable per job id, so a reconnect reuses the same client instead of stacking up
+#: new ones. Defined in the tmux module because that is where it also has to be
+#: filtered back out of pane discovery.
+BG_SESSION_PREFIX = tmux_mod.AGENTVIEW_BG_PREFIX
+
+#: Reason shown for interactive sessions that were not started inside a multiplexer.
+#: These are the genuinely unattachable ones -- there is a terminal, but it belongs to
+#: whoever launched it and we cannot steal it without ptrace.
+NO_TERMINAL = "started outside tmux - no terminal to attach to"
+
+
+def bg_attach_argv(
+    job_id: str, claude_bin: str, use_tmux: bool
+) -> Tuple[List[str], Optional[List[str]]]:
+    """Build the argv pair that opens a *background* session.
+
+    Background sessions have no controlling terminal -- `ps` reports tty `??` -- so
+    there is no PTY to hook onto. They are still reachable: `claude attach <id>` opens
+    a fresh client onto the running session over its unix socket, and detaching leaves
+    the session running. That makes them attachable by a different route than
+    tmux-resident sessions, not unattachable.
+
+    We park the client inside tmux when tmux exists, so closing the browser tab leaves
+    the client alive and a reconnect lands back where you were. Without tmux the client
+    runs directly in the PTY, which still works -- it just restarts on each reconnect.
+    """
+    if not use_tmux:
+        return [claude_bin, "attach", job_id], None
+    session = BG_SESSION_PREFIX + job_id
+    # `new-session -A` is create-or-attach, which is exactly the reconnect semantics we
+    # want: first open creates the client, later ones join it.
+    argv = ["tmux", "new-session", "-A", "-s", session, claude_bin, "attach", job_id]
+    quoted = " ".join(
+        shlex.quote(part) for part in ("tmux", "new-session", "-d", "-s", session, claude_bin, "attach", job_id)
+    )
+    readonly = [
+        "sh",
+        "-c",
+        "tmux has-session -t {s} 2>/dev/null || {create}; exec tmux attach -r -t {s}".format(
+            s=shlex.quote(session), create=quoted
+        ),
+    ]
+    return argv, readonly
+
+
 def _resolve_status(session_status: Optional[str], job_state: Optional[str]) -> str:
     """Merge the two status axes Claude Code exposes.
 
@@ -135,11 +183,17 @@ class ClaudeCodeAdapter(Adapter):
         self,
         config_dir: Optional[Path] = None,
         process_table_fn: Optional[Callable[[], Dict[int, str]]] = None,
+        which_fn: Optional[Callable[[str], Optional[str]]] = None,
+        tmux_available_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.config_dir = Path(config_dir) if config_dir else default_config_dir()
         #: Injectable so tests can pin liveness instead of depending on whatever
         #: happens to be running on the machine at the time.
         self._process_table_fn = process_table_fn or process_table
+        #: Same reasoning for attach: whether `claude` and `tmux` exist is a property
+        #: of the box, and tests should not depend on it.
+        self._which = which_fn or shutil.which
+        self._tmux_available_fn = tmux_available_fn or tmux_mod.available
 
     def available(self) -> bool:
         return (self.config_dir / "sessions").is_dir()
@@ -157,6 +211,28 @@ class ClaudeCodeAdapter(Adapter):
                 return None
             return branch
         return None
+
+    def _attach_for(self, kind: Any, job_id: Any) -> AttachSpec:
+        """Pick the attach route for one session.
+
+        Two kinds of Claude Code session reach us and they attach by different means:
+
+          interactive -- has a real controlling terminal. If that terminal is a tmux
+                         pane, TmuxAdapter supplies the attach and fills it in during
+                         the merge; we deliberately leave it unavailable here so it
+                         does. If it is a bare terminal, nothing can attach.
+          bg          -- no controlling terminal at all, but reachable via
+                         `claude attach <job id>`.
+        """
+        if kind != "bg":
+            return AttachSpec.unavailable(NO_TERMINAL)
+        if not isinstance(job_id, str) or not job_id:
+            return AttachSpec.unavailable("background session has no job id to open")
+        claude_bin = self._which("claude")
+        if not claude_bin:
+            return AttachSpec.unavailable("`claude` is not on PATH - cannot open a client")
+        argv, readonly = bg_attach_argv(job_id, claude_bin, bool(self._tmux_available_fn()))
+        return AttachSpec(available=True, argv=argv, argv_readonly=readonly)
 
     def discover(self, ctx: ContextRef) -> Tuple[List[AgentRecord], List[str]]:
         records: List[AgentRecord] = []
@@ -224,11 +300,7 @@ class ClaudeCodeAdapter(Adapter):
                 updated_at=_ms_to_s(data.get("updatedAt") or data.get("statusUpdatedAt")),
                 tokens=tokens if isinstance(tokens, int) else None,
                 color=job_state.get("color"),
-                # M3 fills this in for tmux-launched agents; until then be explicit
-                # about why the detail view is disabled rather than silently dead.
-                attach=AttachSpec.unavailable(
-                    "started outside tmux - no terminal to attach to"
-                ),
+                attach=self._attach_for(data.get("kind"), job_id),
                 source=self.name,
                 extra={
                     "session_id": session_id,

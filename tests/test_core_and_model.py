@@ -47,6 +47,18 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(merged[0].cwd, "/workspace")  # richer adapter wins
         self.assertEqual(merged[0].git_branch, "main")  # but blanks get filled
 
+    def test_keeps_a_working_attach_over_a_later_adapters(self):
+        """The two attach routes must not fight.
+
+        ClaudeCodeAdapter now supplies `claude attach` for background sessions and
+        deliberately supplies nothing for interactive ones, so TmuxAdapter can fill
+        those in. That only works if a route already present survives the merge.
+        """
+        bg = record(attach=AttachSpec(available=True, argv=["claude", "attach", "j1"]))
+        later = record(attach=AttachSpec(available=True, argv=["tmux", "attach"]))
+        merged = merge([[bg], [later]])
+        self.assertEqual(merged[0].attach.argv, ["claude", "attach", "j1"])
+
     def test_takes_a_working_attach_from_a_later_adapter(self):
         without = record(attach=AttachSpec.unavailable("no tmux"))
         with_attach = record(attach=AttachSpec(available=True, argv=["tmux", "attach"]))

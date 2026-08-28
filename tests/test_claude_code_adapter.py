@@ -13,7 +13,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentview.collector.adapters.claude_code import ClaudeCodeAdapter, _resolve_status
+from agentview.collector.adapters.claude_code import (
+    NO_TERMINAL,
+    ClaudeCodeAdapter,
+    _resolve_status,
+)
 from agentview.model import (
     STATUS_BLOCKED,
     STATUS_BUSY,
@@ -29,7 +33,12 @@ FAKE_TABLE = {
     1001: "claude bg-spare",
     1003: "claude",
     1004: "python3",
+    1005: "claude",
 }
+
+#: Whether `claude` and `tmux` exist is a property of the box the tests run on, so
+#: both are injected. Otherwise this suite would pass or fail depending on PATH.
+FAKE_CLAUDE = "/usr/local/bin/claude"
 
 
 class ClaudeCodeAdapterTest(unittest.TestCase):
@@ -42,7 +51,10 @@ class ClaudeCodeAdapterTest(unittest.TestCase):
 
         self.ctx = ContextRef(id="ctx-test", label="test", platform="linux", arch="x86_64")
         self.adapter = ClaudeCodeAdapter(
-            config_dir=FIXTURES, process_table_fn=lambda: dict(FAKE_TABLE)
+            config_dir=FIXTURES,
+            process_table_fn=lambda: dict(FAKE_TABLE),
+            which_fn=lambda name: FAKE_CLAUDE if name == "claude" else None,
+            tmux_available_fn=lambda: True,
         )
         self.records, self.warnings = self.adapter.discover(self.ctx)
         self.by_name = {r.name: r for r in self.records}
@@ -91,11 +103,76 @@ class ClaudeCodeAdapterTest(unittest.TestCase):
         for record in self.records:
             self.assertTrue(record.id.startswith("ctx-test:claude-code:"))
 
-    def test_attach_is_honestly_unavailable(self):
-        """M1 has no attach yet -- the UI must say why, not silently disable."""
-        attach = self.records[0].attach
+    def test_background_session_is_attachable_via_claude_attach(self):
+        """A bg session has no controlling terminal, but it is not unreachable.
+
+        `claude attach <job id>` opens a client onto the running session over its
+        unix socket. Reporting these as unattachable -- which we did until we checked
+        -- hid every background agent behind a dead button.
+        """
+        attach = self.by_name["refactor-api"].attach
+        self.assertTrue(attach.available)
+        self.assertIsNone(attach.reason)
+        self.assertEqual(attach.argv[-3:], [FAKE_CLAUDE, "attach", "job-live"])
+
+    def test_background_attach_is_parked_in_tmux_for_reconnects(self):
+        """`new-session -A` is create-or-attach: reopening joins the same client
+        rather than stacking a second one onto the session."""
+        attach = self.by_name["refactor-api"].attach
+        self.assertEqual(
+            attach.argv[:5],
+            ["tmux", "new-session", "-A", "-s", "agentview_bg_job-live"],
+        )
+
+    def test_background_readonly_variant_creates_then_attaches_readonly(self):
+        readonly = self.by_name["refactor-api"].attach.argv_readonly
+        self.assertEqual(readonly[:2], ["sh", "-c"])
+        self.assertIn("has-session -t agentview_bg_job-live", readonly[2])
+        self.assertIn("tmux attach -r -t agentview_bg_job-live", readonly[2])
+
+    def test_interactive_session_defers_to_the_tmux_adapter(self):
+        """An interactive session owns a real terminal. If that terminal is a tmux
+        pane, TmuxAdapter supplies the attach during the merge -- so this adapter must
+        leave it unavailable rather than routing it through `claude attach`, which is
+        for background sessions only."""
+        attach = self.by_name["hand-started"].attach
         self.assertFalse(attach.available)
-        self.assertTrue(attach.reason)
+        self.assertEqual(attach.reason, NO_TERMINAL)
+
+
+class BackgroundAttachTest(unittest.TestCase):
+    """The attach route is decided from what is on the box, so vary that directly."""
+
+    def _adapter(self, which, tmux_available):
+        return ClaudeCodeAdapter(
+            config_dir=FIXTURES,
+            process_table_fn=lambda: dict(FAKE_TABLE),
+            which_fn=which,
+            tmux_available_fn=lambda: tmux_available,
+        )
+
+    def _refactor_api(self, adapter):
+        ctx = ContextRef(id="ctx-test", label="test")
+        with mock.patch(
+            "agentview.collector.procs.pid_alive", side_effect=lambda pid: pid in FAKE_TABLE
+        ):
+            records, _ = adapter.discover(ctx)
+        return {r.name: r for r in records}["refactor-api"]
+
+    def test_without_tmux_the_client_runs_directly_in_the_pty(self):
+        """Still attachable -- it just restarts on each reconnect instead of
+        surviving one. Degrading to that beats disabling the button."""
+        adapter = self._adapter(lambda n: FAKE_CLAUDE if n == "claude" else None, False)
+        attach = self._refactor_api(adapter).attach
+        self.assertTrue(attach.available)
+        self.assertEqual(attach.argv, [FAKE_CLAUDE, "attach", "job-live"])
+        self.assertIsNone(attach.argv_readonly)
+
+    def test_missing_claude_binary_says_so(self):
+        adapter = self._adapter(lambda n: None, True)
+        attach = self._refactor_api(adapter).attach
+        self.assertFalse(attach.available)
+        self.assertIn("PATH", attach.reason)
 
 
 class ConfigDirTest(unittest.TestCase):

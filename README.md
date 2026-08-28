@@ -96,8 +96,22 @@ python3 -m agentview run -- claude
 python3 -m agentview run --name api -- opencode
 ```
 
-Agents started *elsewhere* still appear in the HUD, but cannot be attached to: you
-cannot add a PTY to a process that is already running outside a multiplexer. That is an
+Agents reach their terminal by one of two routes, picked per session:
+
+| session | route |
+|---|---|
+| running inside tmux | `tmux attach -t <session>` — the terminal it already draws |
+| Claude Code background agent | `claude attach <job id>` — a fresh client onto the running session |
+| started in a bare terminal | not attachable |
+
+Background agents have no controlling terminal at all (`ps` reports tty `??`), so there
+is no PTY to hook onto — but they are not unreachable. Claude Code exposes each session
+on a unix socket, and `claude attach` opens a client onto it; detaching leaves the agent
+running. agentview parks that client in a tmux session of its own so closing the browser
+tab does not kill it.
+
+What is genuinely out of reach is an agent started in an ordinary terminal that is not a
+multiplexer: you cannot add a PTY to a process already running outside one. That is an
 OS constraint, not something agentview can work around, so those rows say so plainly
 rather than offering a button that would do nothing.
 

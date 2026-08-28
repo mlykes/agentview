@@ -28,6 +28,13 @@ def available() -> bool:
     return shutil.which("tmux") is not None
 
 
+#: tmux sessions agentview parks its own `claude attach` clients in. These are
+#: plumbing, not agents: the pane holds a *client* onto a background session whose
+#: real process lives elsewhere with no controlling terminal. Left visible, every
+#: background agent you opened would show up a second time as its own entry.
+AGENTVIEW_BG_PREFIX = "agentview_bg_"
+
+
 def list_panes() -> List[Pane]:
     """Every pane across every tmux session, or [] when tmux is absent or idle."""
     if not available():
@@ -53,6 +60,8 @@ def list_panes() -> List[Pane]:
         try:
             pid = int(parts[1])
         except ValueError:
+            continue
+        if parts[0].startswith(AGENTVIEW_BG_PREFIX):
             continue
         panes.append(Pane(session=parts[0], pid=pid, command=parts[2], path=parts[3]))
     return panes
