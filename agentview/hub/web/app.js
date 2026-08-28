@@ -88,6 +88,7 @@
     if (canEdit) {
       name.appendChild(swatchButton(agent, name));
       name.appendChild(renameButton(agent, name, label));
+      if (stoppable(agent)) name.appendChild(killButton(agent));
     }
     row.appendChild(name);
 
@@ -95,13 +96,11 @@
     if (agent.harness_version) badge.title = agent.harness_label + " " + agent.harness_version;
     row.appendChild(badge);
 
-    var cwd = el("div", "cwd");
-    cwd.appendChild(document.createTextNode(homeRelative(agent.cwd)));
-    if (agent.git_branch) {
-      cwd.appendChild(el("span", "branch", "  ⎇ " + agent.git_branch));
-    }
-    cwd.title = agent.cwd || "";
-    row.appendChild(cwd);
+    // The directory is the group heading now, so repeating it on every row would
+    // just be noise. The branch is not in the heading, so it stays here.
+    var branch = el("div", "branch-cell", agent.git_branch ? "⎇ " + agent.git_branch : "");
+    branch.title = agent.cwd || "";
+    row.appendChild(branch);
 
     var right = el("div", "right");
     if (agent.stuck) {
@@ -126,6 +125,33 @@
       row.appendChild(el("div", "no-attach", agent.attach.reason));
     }
     return row;
+  }
+
+  function stoppable(agent) {
+    // The same two signals the server decides on -- a background job has an id to
+    // pass to `claude stop`, and a tmux-resident agent has a session to kill.
+    // Repeated here only to avoid rendering a control that would always fail; the
+    // server re-checks and stays the authority.
+    var extra = agent.extra || {};
+    return !!(extra.job_id || extra.tmux_session);
+  }
+
+  function killButton(agent) {
+    var btn = el("button", "rename kill", "\u2715");
+    btn.type = "button";
+    btn.title = "stop this agent";
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();  // the row itself opens the terminal
+      // Stopping ends a running agent and cannot be undone from here, so it asks
+      // first -- and names the agent, because these rows sit close together.
+      var what = (agent.extra || {}).job_id
+        ? "Stop \"" + agent.name + "\"?\n\nThe session ends and its transcript is kept."
+        : "Stop \"" + agent.name + "\"?\n\nThis kills the tmux session it runs in.";
+      if (!window.confirm(what)) return;
+      if (current && current.id === agent.id) closeTerminal();
+      post("/v1/stop", { id: agent.id });
+    });
+    return btn;
   }
 
   function swatchButton(agent, nameCell) {
@@ -243,6 +269,27 @@
     post("/v1/rename", { id: id, name: value });
   }
 
+  function byDirectory(agents) {
+    var groups = {};
+    var order = [];
+    agents.forEach(function (agent) {
+      var key = agent.cwd || "";
+      if (!groups[key]) {
+        groups[key] = { cwd: key, label: key ? homeRelative(key) : "(no directory)", agents: [] };
+        order.push(key);
+      }
+      groups[key].agents.push(agent);
+    });
+    // Alphabetical by displayed path so the list does not reshuffle as agents come
+    // and go; agents with no directory sit at the end rather than sorting as "".
+    order.sort(function (a, b) {
+      if (!a) return 1;
+      if (!b) return -1;
+      return groups[a].label < groups[b].label ? -1 : groups[a].label > groups[b].label ? 1 : 0;
+    });
+    return order.map(function (key) { return groups[key]; });
+  }
+
   function contextCard(node, isChild) {
     var ctx = node.context;
     var card = el("div", "ctx" + (isChild ? " child" : ""));
@@ -263,7 +310,15 @@
     if (!node.agents.length) {
       card.appendChild(el("div", "empty", "no agents running here"));
     } else {
-      node.agents.forEach(function (agent) { card.appendChild(agentRow(agent)); });
+      byDirectory(node.agents).forEach(function (group) {
+        var head = el("div", "dir-head");
+        head.appendChild(el("span", "dir-path", group.label));
+        head.title = group.cwd || "";
+        head.appendChild(el("span", "dir-count",
+          group.agents.length + " agent" + (group.agents.length === 1 ? "" : "s")));
+        card.appendChild(head);
+        group.agents.forEach(function (agent) { card.appendChild(agentRow(agent)); });
+      });
     }
 
     if (node.warnings && node.warnings.length) {

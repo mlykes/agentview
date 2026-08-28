@@ -22,6 +22,7 @@ import os
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -307,6 +308,36 @@ class Handler(BaseHTTPRequestHandler):
             # token for would render as no colour at all.
             colour = self.state.overrides.set_colour(agent_id, payload.get("color"))
             return self._json(200, {"ok": True, "color": colour})
+
+        if parsed.path == "/v1/stop":
+            if not self.state.can_edit:
+                return self._json(403, {"error": "stopping is disabled on this hub"})
+            agent_id = str(payload.get("id") or "")
+            agent = self.state.registry.find_agent(agent_id) if agent_id else None
+            if agent is None:
+                return self._json(404, {"error": "no such agent"})
+            if agent.get("context_id") != self.state.local_context_id:
+                # Same rule as attach: the argv is written for the collector's
+                # machine, so running it here would act on the wrong box.
+                return self._json(409, {"error": "agent is on another machine"})
+            argv, error = runner.stop_argv(agent)
+            if error:
+                return self._json(409, {"error": error})
+            try:
+                result = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return self._json(500, {"error": str(exc)})
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip().splitlines()
+                return self._json(
+                    500, {"error": detail[-1] if detail else "stop failed"}
+                )
+            # The terminal is pointing at something that no longer exists.
+            self.state.ptys.close(agent_id)
+            # The row lingers until the collector's next tick notices it is gone;
+            # dropping the override now would leave a renamed agent nameless if the
+            # stop turns out not to have taken.
+            return self._json(200, {"ok": True})
 
         if parsed.path == "/v1/snapshot":
             self.state.registry.ingest(payload)

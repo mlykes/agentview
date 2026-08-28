@@ -17,10 +17,11 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from agentview.collector import tmux
 
@@ -110,6 +111,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- <command to run>")
     return parser
+
+
+def stop_argv(agent) -> Tuple[Optional[List[str]], Optional[str]]:
+    """(argv, error) for stopping an agent, derived from what the collector reported.
+
+    Like attach, this is *just an argv*, and like attach it is resolved from the
+    registry rather than from the request -- a browser naming its own command on a
+    loopback port would be arbitrary execution.
+
+    Two routes, matching the two kinds of session:
+
+      background   `claude stop <job id>`, the CLI's own subcommand, which shuts the
+                   session down cleanly rather than killing a process out from under
+                   its transcript.
+      inside tmux  kill the session that holds it. There is no cleaner lever: the
+                   agent owns that terminal and nothing else can address it.
+
+    An agent that is neither -- one started in a bare terminal -- cannot be stopped
+    from here, and says so rather than offering a control that would do nothing.
+    """
+    extra = agent.get("extra") or {}
+    job_id = extra.get("job_id")
+    if agent.get("harness") == "claude-code" and job_id:
+        claude = shutil.which("claude")
+        if not claude:
+            return None, "`claude` is not on PATH - cannot stop this session"
+        return [claude, "stop", str(job_id)], None
+
+    session = extra.get("tmux_session")
+    if session:
+        if not tmux.available():
+            return None, "tmux is not installed - cannot stop this session"
+        return ["tmux", "kill-session", "-t", str(session)], None
+
+    return None, "started outside tmux - agentview cannot stop it"
 
 
 def launch_detached(command: List[str], name: str) -> str:

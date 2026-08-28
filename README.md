@@ -127,6 +127,24 @@ way to try this, that was the common case rather than an edge case.
 
 ## Reading the list
 
+**Agents are grouped by working directory.** "What is running in this repo" is the
+question you actually ask; the host matters less once you have more than a couple of
+machines. Each context card breaks into one group per directory, so the row itself no
+longer repeats the path — it carries the git branch instead.
+
+**Stopping an agent.** The ✕ beside a name ends it, after a confirmation. Like attach,
+stopping is *just an argv* resolved from the registry rather than from the request:
+
+| session | how it stops |
+|---|---|
+| background | `claude stop <job id>` — shuts the session down, transcript kept |
+| running in tmux | the tmux session it lives in is killed |
+| started in a bare terminal | no control shown; there is no lever to pull |
+
+Only agents in the hub's own context can be stopped — the argv is written for the
+collector's machine — and `--read-only` refuses it entirely.
+
+
 **Colours come from the harness, not from agentview.** Claude Code assigns each
 background session a colour; agentview carries it through to the agent's name and the
 row's left edge, so a session you recognise in `claude agents` looks the same here. The
