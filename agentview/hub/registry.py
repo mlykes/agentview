@@ -158,11 +158,23 @@ class Registry:
                 agent["harness_name"] = agent.get("name")
                 agent["name"] = override["name"]
             if override.get("color"):
-                # The harness's own colour wins when it records one; this fills the
-                # gap for the sessions where it records nothing.
-                if agent.get("color"):
-                    agent["harness_color"] = agent["color"]
-                agent["color"] = override["color"]
+                # Most recent wins. A colour can be set in two places -- the swatch
+                # here, or `/color` inside the session -- and if one source simply
+                # always overruled the other, changing it in the losing place would
+                # appear to do nothing. Both are timestamped so they can be ordered.
+                #
+                # An untimed value counts as older than any timed one: overrides
+                # written before this existed carry no time, and a session's colour
+                # taken from `state.json` rather than the transcript has none either.
+                # On a tie -- neither timed -- the override wins, since it is the
+                # more explicit of the two.
+                theirs = agent.get("color")
+                set_here = override.get("color_at") or 0
+                set_there = (agent.get("extra") or {}).get("color_at") or 0
+                if not theirs or set_here >= set_there:
+                    if theirs:
+                        agent["harness_color"] = theirs
+                    agent["color"] = override["color"]
         return agent
 
     def flat_agents(self) -> List[Dict[str, Any]]:

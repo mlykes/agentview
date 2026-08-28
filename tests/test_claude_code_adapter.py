@@ -221,16 +221,16 @@ class SessionColourTest(unittest.TestCase):
         adapter = ClaudeCodeAdapter(
             config_dir=FIXTURES, process_table_fn=lambda: dict(FAKE_TABLE)
         )
-        self.assertIsNone(adapter._session_colour("no-such-session"))
+        self.assertEqual(adapter._session_colour("no-such-session"), (None, None))
 
     def test_rescanning_only_reads_what_was_appended(self):
         """Transcripts are append-only and reach megabytes, so each tick reads the
         new tail rather than the whole file."""
         sid = "aaaaaaaa-0000-0000-0000-000000000005"
-        first = self.adapter._session_colour(sid)
-        offset, _ = self.adapter._colour_scan[sid]
+        colour, _ = self.adapter._session_colour(sid)
+        offset = self.adapter._colour_scan[sid][0]
         size = self.adapter._transcript(sid).stat().st_size
-        self.assertEqual(first, "teal")
+        self.assertEqual(colour, "teal")
         self.assertEqual(offset, size)  # nothing left to re-read
 
 
@@ -251,21 +251,40 @@ class ScanColourTest(unittest.TestCase):
 
     def test_finds_the_last_colour(self):
         chunk = b"\n".join([self._line("red"), self._line("green")])
-        self.assertEqual(scan_colour(chunk), "green")
+        self.assertEqual(scan_colour(chunk)[0], "green")
 
     def test_ignores_unrelated_records(self):
         chunk = b'{"type":"user","content":"talk about /color someday"}'
-        self.assertIsNone(scan_colour(chunk))
+        self.assertIsNone(scan_colour(chunk)[0])
 
     def test_survives_a_truncated_line(self):
         chunk = b'{"type":"system","content":"<command-name>/color</comm\n' + self._line("pink")
-        self.assertEqual(scan_colour(chunk), "pink")
+        self.assertEqual(scan_colour(chunk)[0], "pink")
 
     def test_empty_input_is_no_colour(self):
-        self.assertIsNone(scan_colour(b""))
+        self.assertIsNone(scan_colour(b"")[0])
+
+    def test_the_time_of_the_change_is_reported(self):
+        """Without it a colour set here and one set in the session cannot be
+        ordered, and one source has to always overrule the other."""
+        line = json.dumps({
+            "type": "system",
+            "subtype": "local_command",
+            "timestamp": "2026-08-28T20:29:35.365Z",
+            "content": "<command-name>/color</command-name>"
+                       "<command-args>pink</command-args>",
+        }).encode()
+        colour, at = scan_colour(line)
+        self.assertEqual(colour, "pink")
+        self.assertAlmostEqual(at, 1787948975.365, places=2)
+
+    def test_a_record_with_no_timestamp_still_yields_the_colour(self):
+        colour, at = scan_colour(self._line("blue"))
+        self.assertEqual(colour, "blue")
+        self.assertIsNone(at)
 
     def test_case_is_normalised(self):
-        self.assertEqual(scan_colour(self._line("TEAL")), "teal")
+        self.assertEqual(scan_colour(self._line("TEAL"))[0], "teal")
 
 
 class ConfigDirTest(unittest.TestCase):

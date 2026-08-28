@@ -27,6 +27,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -103,6 +104,9 @@ class Overrides:
         colour = clean_colour(value.get("color"))
         if colour:
             entry["color"] = colour
+            at = value.get("color_at")
+            if isinstance(at, (int, float)) and at > 0:
+                entry["color_at"] = float(at)
         return entry
 
     def _load(self) -> Dict[str, Dict[str, str]]:
@@ -169,5 +173,25 @@ class Overrides:
         return self._set(agent_id, "name", clean_name(name))
 
     def set_colour(self, agent_id: str, colour: Optional[str]) -> Optional[str]:
-        """Set a colour, or clear it to fall back to the harness's own."""
-        return self._set(agent_id, "color", clean_colour(colour))
+        """Set a colour, or clear it to fall back to the harness's own.
+
+        Stamped with the time, so a colour set here and one set with `/color` in the
+        session can be ordered against each other. Without that the two sources can
+        only disagree: whichever one is declared the winner overrules the other no
+        matter which the user actually touched last.
+        """
+        value = clean_colour(colour)
+        with self._lock:
+            entry = dict(self._entries.get(agent_id) or {})
+            if value is None:
+                entry.pop("color", None)
+                entry.pop("color_at", None)
+            else:
+                entry["color"] = value
+                entry["color_at"] = time.time()
+            if entry:
+                self._entries[agent_id] = entry
+            else:
+                self._entries.pop(agent_id, None)
+            self._save()
+        return value

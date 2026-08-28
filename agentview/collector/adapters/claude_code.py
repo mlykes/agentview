@@ -16,6 +16,7 @@ Stdlib only.
 
 from __future__ import annotations
 
+import datetime
 import glob
 import json
 import os
@@ -105,14 +106,37 @@ _COLOUR_CMD = re.compile(
 )
 
 
-def scan_colour(chunk: bytes) -> Optional[str]:
-    """The last colour set by `/color` in a slice of transcript, if any.
+def _iso_to_epoch(value: Any) -> Optional[float]:
+    """Transcript timestamps are ISO-8601 with a trailing Z.
+
+    `datetime.fromisoformat` only accepts that suffix from 3.11, and the collector
+    has to run on 3.9, so parse it explicitly.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.replace("Z", "").replace("z", "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            parsed = datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=datetime.timezone.utc).timestamp()
+    return None
+
+
+def scan_colour(chunk: bytes) -> Tuple[Optional[str], Optional[float]]:
+    """The last colour set by `/color` in a slice of transcript, and when.
+
+    The timestamp is what lets a colour set in the session and a colour set in
+    agentview be compared, so that the most recent one wins rather than one source
+    always overruling the other.
 
     Only lines mentioning the command are parsed: a transcript is mostly large
     message records, and JSON-decoding all of them every tick would cost far more
     than this is worth.
     """
     colour = None
+    at = None
     for line in chunk.splitlines():
         if b"/color" not in line:
             continue
@@ -130,7 +154,8 @@ def scan_colour(chunk: bytes) -> Optional[str]:
             value = match.group(1).strip().lower()
             if value:
                 colour = value
-    return colour
+                at = _iso_to_epoch(record.get("timestamp"))
+    return colour, at
 
 
 def _last_timeline_event(job_dir: Path) -> Optional[Dict[str, Any]]:
@@ -239,9 +264,9 @@ class ClaudeCodeAdapter(Adapter):
         #: of the box, and tests should not depend on it.
         self._which = which_fn or shutil.which
         self._tmux_available_fn = tmux_available_fn or tmux_mod.available
-        #: session id -> (bytes already scanned, colour found so far). Transcripts
-        #: only grow, so each tick reads the new tail rather than the whole file.
-        self._colour_scan: Dict[str, Tuple[int, Optional[str]]] = {}
+        #: session id -> (bytes already scanned, colour, when it was set).
+        #: Transcripts only grow, so each tick reads the new tail, not the file.
+        self._colour_scan: Dict[str, Tuple[int, Optional[str], Optional[float]]] = {}
 
     def available(self) -> bool:
         return (self.config_dir / "sessions").is_dir()
@@ -251,7 +276,7 @@ class ClaudeCodeAdapter(Adapter):
         matches = glob.glob(pattern)
         return Path(matches[0]) if matches else None
 
-    def _session_colour(self, session_id: str) -> Optional[str]:
+    def _session_colour(self, session_id: str) -> Tuple[Optional[str], Optional[float]]:
         """The colour an interactive session set with `/color`.
 
         Background sessions record theirs in ``jobs/<id>/state.json`` and that is
@@ -261,18 +286,18 @@ class ClaudeCodeAdapter(Adapter):
         """
         path = self._transcript(session_id)
         if path is None:
-            return None
+            return None, None
         try:
             size = path.stat().st_size
         except OSError:
-            return None
+            return None, None
 
-        offset, colour = self._colour_scan.get(session_id, (None, None))
+        offset, colour, at = self._colour_scan.get(session_id, (None, None, None))
         if offset is None or offset > size:
             # First look, or the file was replaced: start a bounded distance back.
             offset = max(0, size - COLOUR_WINDOW)
         if offset == size:
-            return colour
+            return colour, at
 
         try:
             with path.open("rb") as fh:
@@ -281,13 +306,13 @@ class ClaudeCodeAdapter(Adapter):
                     fh.readline()  # discard a line we may have cut in half
                 chunk = fh.read()
         except OSError:
-            return colour
+            return colour, at
 
-        found = scan_colour(chunk)
+        found, found_at = scan_colour(chunk)
         if found:
-            colour = found
-        self._colour_scan[session_id] = (size, colour)
-        return colour
+            colour, at = found, found_at
+        self._colour_scan[session_id] = (size, colour, at)
+        return colour, at
 
     def _git_branch(self, session_id: str) -> Optional[str]:
         pattern = str(self.config_dir / "projects" / "*" / "{}.jsonl".format(session_id))
@@ -374,6 +399,12 @@ class ClaudeCodeAdapter(Adapter):
                 or session_id[:8]
             )
 
+            # The transcript is preferred over the job state because it is the
+            # only timestamped source. Without a time, a colour set here and one
+            # set in the session cannot be ordered, and one has to always overrule
+            # the other -- which is exactly what made them disagree.
+            session_colour, colour_at = self._session_colour(session_id)
+
             tokens = job_state.get("tokens")
             record = AgentRecord(
                 id="{}:{}:{}".format(ctx.id, HARNESS, session_id),
@@ -390,14 +421,13 @@ class ClaudeCodeAdapter(Adapter):
                 started_at=_ms_to_s(data.get("startedAt")),
                 updated_at=_ms_to_s(data.get("updatedAt") or data.get("statusUpdatedAt")),
                 tokens=tokens if isinstance(tokens, int) else None,
-                # The job state is authoritative when it exists; the transcript is
-                # the only source for everything else.
-                color=job_state.get("color") or self._session_colour(session_id),
+                color=session_colour or job_state.get("color"),
                 attach=self._attach_for(data.get("kind"), job_id),
                 source=self.name,
                 extra={
                     "session_id": session_id,
                     "job_id": job_id,
+                    "color_at": colour_at,
                     "kind": data.get("kind"),
                     "entrypoint": data.get("entrypoint"),
                     "agent": data.get("agent"),

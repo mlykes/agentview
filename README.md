@@ -145,11 +145,11 @@ Only agents in the hub's own context can be stopped — the argv is written for 
 collector's machine — and `--read-only` refuses it entirely.
 
 
-**Colours come from the harness, not from agentview.** Claude Code assigns each
-background session a colour; agentview carries it through to the agent's name and the
-row's left edge, so a session you recognise in `claude agents` looks the same here. The
-status dot keeps meaning status — busy, idle, blocked, stuck — because that is the
-question the HUD exists to answer.
+**Colours come from the session where possible.** Claude Code gives each session a
+colour; agentview carries it through to the agent's name and the row's left edge, so a
+session you recognise in `claude agents` looks the same here. The status dot keeps
+meaning status — busy, idle, blocked, stuck — because that is the question the HUD
+exists to answer.
 
 A colour is read from two places, in this order:
 
@@ -171,11 +171,20 @@ repeated is missed, which shows as no colour rather than a wrong one.
 
 Sessions with no colour anywhere stay neutral rather than getting an invented one.
 
-**You can also set a colour here**, from the swatch beside the name, for the cases the
-harness has nothing to say about. An explicit choice in agentview wins over the
-harness's, and the displaced value is kept as `harness_color` and shown on hover.
-Clearing it falls back to the harness — so if you set a colour here and later change it
-with `/color`, clear the override or the row will keep showing yours.
+**You can also set a colour here**, from the swatch beside the name.
+
+That means a colour has two places it can be changed — the swatch, or `/color` inside
+the session — so **the most recent change wins**. Both are timestamped: the transcript
+records when `/color` ran, and the swatch records when you clicked it. If one source
+simply always overruled the other, changing the colour in the losing place would appear
+to do nothing.
+
+The displaced value is kept as `harness_color` and shown on hover, so you can see what
+the session itself says. Clearing the swatch colour falls back to the session's.
+
+A colour with no time attached counts as older than one with a time. That applies to
+overrides written before this existed, and to a background session's colour taken from
+`state.json`, which records no time of its own.
 
 **Renaming is agentview's own label.** Click the pencil beside a name, type, press
 Enter. Clearing the field restores the original.
