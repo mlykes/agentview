@@ -151,10 +151,31 @@ row's left edge, so a session you recognise in `claude agents` looks the same he
 status dot keeps meaning status — busy, idle, blocked, stuck — because that is the
 question the HUD exists to answer.
 
-Sessions with no colour recorded stay neutral rather than getting an invented one. In
-practice that means interactive sessions: Claude Code stores a colour for background
-jobs in `jobs/<id>/state.json`, but a `/color` set in an interactive session leaves
-nothing on disk to read.
+A colour is read from two places, in this order:
+
+| source | covers |
+|---|---|
+| `jobs/<id>/state.json` | background sessions, where the harness records it as a field |
+| the transcript's `/color` command | everything else, including interactive sessions |
+
+The second one matters more than it sounds. `/color` is not stored as a field
+anywhere — not in the session file, the job state, or the daemon roster — so an
+interactive session's colour looks unreadable at first. It is recorded in the
+transcript as a local command, and that is the only durable trace of it. Without
+reading it, a session shows plain in the HUD while its own UI shows the colour you set,
+which reads as agentview being broken.
+
+Transcripts reach megabytes, so the first read is bounded and every read after it is
+incremental — the file only ever grows. A `/color` set before that window and never
+repeated is missed, which shows as no colour rather than a wrong one.
+
+Sessions with no colour anywhere stay neutral rather than getting an invented one.
+
+**You can also set a colour here**, from the swatch beside the name, for the cases the
+harness has nothing to say about. An explicit choice in agentview wins over the
+harness's, and the displaced value is kept as `harness_color` and shown on hover.
+Clearing it falls back to the harness — so if you set a colour here and later change it
+with `/color`, clear the override or the row will keep showing yours.
 
 **Renaming is agentview's own label.** Click the pencil beside a name, type, press
 Enter. Clearing the field restores the original.

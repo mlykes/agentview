@@ -9,6 +9,7 @@ Liveness is injected rather than observed so the suite is deterministic -- wheth
 
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -17,6 +18,7 @@ from agentview.collector.adapters.claude_code import (
     NO_TERMINAL,
     ClaudeCodeAdapter,
     _resolve_status,
+    scan_colour,
 )
 from agentview.model import (
     STATUS_BLOCKED,
@@ -173,6 +175,97 @@ class BackgroundAttachTest(unittest.TestCase):
         attach = self._refactor_api(adapter).attach
         self.assertFalse(attach.available)
         self.assertIn("PATH", attach.reason)
+
+
+class SessionColourTest(unittest.TestCase):
+    """Where a session's colour comes from.
+
+    `/color` is not stored as a field anywhere -- not the session file, the job
+    state, or the daemon roster -- so an interactive session's colour looked
+    unreadable. It is recorded in the transcript as a local command, which is what
+    this reads. Missing it meant a session showed plain in the HUD while its own UI
+    showed the colour the user had set.
+    """
+
+    def setUp(self):
+        patcher = mock.patch(
+            "agentview.collector.procs.pid_alive", side_effect=lambda pid: pid in FAKE_TABLE
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        self.adapter = ClaudeCodeAdapter(
+            config_dir=FIXTURES,
+            process_table_fn=lambda: dict(FAKE_TABLE),
+            which_fn=lambda name: FAKE_CLAUDE if name == "claude" else None,
+            tmux_available_fn=lambda: True,
+        )
+        records, _ = self.adapter.discover(
+            ContextRef(id="ctx-test", label="test", platform="linux")
+        )
+        self.by_name = {r.name: r for r in records}
+
+    def test_interactive_colour_comes_from_the_transcript(self):
+        self.assertEqual(self.by_name["hand-started"].color, "teal")
+
+    def test_the_latest_colour_wins(self):
+        """The fixture sets red and later teal; the session is teal."""
+        self.assertNotEqual(self.by_name["hand-started"].color, "red")
+
+    def test_job_state_wins_when_it_records_one(self):
+        """A background session's state.json is authoritative -- the transcript is
+        only consulted when there is nothing better."""
+        self.assertEqual(self.by_name["refactor-api"].color, "blue")
+
+    def test_a_session_with_no_colour_stays_uncoloured(self):
+        self.assertIsNone(self.by_name["waiting-on-me"].git_branch)  # sanity: fixture read
+        adapter = ClaudeCodeAdapter(
+            config_dir=FIXTURES, process_table_fn=lambda: dict(FAKE_TABLE)
+        )
+        self.assertIsNone(adapter._session_colour("no-such-session"))
+
+    def test_rescanning_only_reads_what_was_appended(self):
+        """Transcripts are append-only and reach megabytes, so each tick reads the
+        new tail rather than the whole file."""
+        sid = "aaaaaaaa-0000-0000-0000-000000000005"
+        first = self.adapter._session_colour(sid)
+        offset, _ = self.adapter._colour_scan[sid]
+        size = self.adapter._transcript(sid).stat().st_size
+        self.assertEqual(first, "teal")
+        self.assertEqual(offset, size)  # nothing left to re-read
+
+
+class ScanColourTest(unittest.TestCase):
+    def _line(self, colour):
+        # The real records carry an escaped newline between the tags. Written as a
+        # literal one it would be invalid JSON, which is worth getting right here:
+        # the scanner has to cope with the real shape, not a convenient one.
+        return json.dumps({
+            "type": "system",
+            "subtype": "local_command",
+            "content": (
+                "<command-name>/color</command-name>\n"
+                "            <command-message>color</command-message>\n"
+                "            <command-args>" + colour + "</command-args>"
+            ),
+        }).encode()
+
+    def test_finds_the_last_colour(self):
+        chunk = b"\n".join([self._line("red"), self._line("green")])
+        self.assertEqual(scan_colour(chunk), "green")
+
+    def test_ignores_unrelated_records(self):
+        chunk = b'{"type":"user","content":"talk about /color someday"}'
+        self.assertIsNone(scan_colour(chunk))
+
+    def test_survives_a_truncated_line(self):
+        chunk = b'{"type":"system","content":"<command-name>/color</comm\n' + self._line("pink")
+        self.assertEqual(scan_colour(chunk), "pink")
+
+    def test_empty_input_is_no_colour(self):
+        self.assertIsNone(scan_colour(b""))
+
+    def test_case_is_normalised(self):
+        self.assertEqual(scan_colour(self._line("TEAL")), "teal")
 
 
 class ConfigDirTest(unittest.TestCase):

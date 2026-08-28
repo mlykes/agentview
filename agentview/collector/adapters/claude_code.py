@@ -19,6 +19,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import shlex
 import shutil
 from pathlib import Path
@@ -86,6 +87,50 @@ def _tail_field(path: Path, field: str, max_bytes: int = 65536) -> Optional[Any]
         if isinstance(record, dict) and record.get(field) is not None:
             return record[field]
     return None
+
+
+#: How far back to look the first time a transcript is scanned for a colour.
+#: Transcripts reach megabytes, so the initial read is bounded; everything after it
+#: is incremental, because the file is append-only. A `/color` set before this
+#: window and never repeated is missed, which shows as no colour rather than a
+#: wrong one.
+COLOUR_WINDOW = 2 * 1024 * 1024
+
+#: `/color` is not stored as a field anywhere -- not in the session file, the job
+#: state, or the daemon roster. It *is* recorded in the transcript as a local
+#: command, which is the only durable trace of an interactive session's colour.
+_COLOUR_CMD = re.compile(
+    r"<command-name>/color</command-name>.*?<command-args>([^<]*)</command-args>",
+    re.S,
+)
+
+
+def scan_colour(chunk: bytes) -> Optional[str]:
+    """The last colour set by `/color` in a slice of transcript, if any.
+
+    Only lines mentioning the command are parsed: a transcript is mostly large
+    message records, and JSON-decoding all of them every tick would cost far more
+    than this is worth.
+    """
+    colour = None
+    for line in chunk.splitlines():
+        if b"/color" not in line:
+            continue
+        try:
+            record = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        content = record.get("content")
+        if not isinstance(content, str):
+            continue
+        match = _COLOUR_CMD.search(content)
+        if match:
+            value = match.group(1).strip().lower()
+            if value:
+                colour = value
+    return colour
 
 
 def _last_timeline_event(job_dir: Path) -> Optional[Dict[str, Any]]:
@@ -194,9 +239,55 @@ class ClaudeCodeAdapter(Adapter):
         #: of the box, and tests should not depend on it.
         self._which = which_fn or shutil.which
         self._tmux_available_fn = tmux_available_fn or tmux_mod.available
+        #: session id -> (bytes already scanned, colour found so far). Transcripts
+        #: only grow, so each tick reads the new tail rather than the whole file.
+        self._colour_scan: Dict[str, Tuple[int, Optional[str]]] = {}
 
     def available(self) -> bool:
         return (self.config_dir / "sessions").is_dir()
+
+    def _transcript(self, session_id: str) -> Optional[Path]:
+        pattern = str(self.config_dir / "projects" / "*" / "{}.jsonl".format(session_id))
+        matches = glob.glob(pattern)
+        return Path(matches[0]) if matches else None
+
+    def _session_colour(self, session_id: str) -> Optional[str]:
+        """The colour an interactive session set with `/color`.
+
+        Background sessions record theirs in ``jobs/<id>/state.json`` and that is
+        used first. Interactive ones -- and background ones whose job directory was
+        never written, such as a pre-warmed spare -- have no such field, so without
+        this their colour is invisible to the HUD no matter what the session shows.
+        """
+        path = self._transcript(session_id)
+        if path is None:
+            return None
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return None
+
+        offset, colour = self._colour_scan.get(session_id, (None, None))
+        if offset is None or offset > size:
+            # First look, or the file was replaced: start a bounded distance back.
+            offset = max(0, size - COLOUR_WINDOW)
+        if offset == size:
+            return colour
+
+        try:
+            with path.open("rb") as fh:
+                fh.seek(offset)
+                if offset:
+                    fh.readline()  # discard a line we may have cut in half
+                chunk = fh.read()
+        except OSError:
+            return colour
+
+        found = scan_colour(chunk)
+        if found:
+            colour = found
+        self._colour_scan[session_id] = (size, colour)
+        return colour
 
     def _git_branch(self, session_id: str) -> Optional[str]:
         pattern = str(self.config_dir / "projects" / "*" / "{}.jsonl".format(session_id))
@@ -299,7 +390,9 @@ class ClaudeCodeAdapter(Adapter):
                 started_at=_ms_to_s(data.get("startedAt")),
                 updated_at=_ms_to_s(data.get("updatedAt") or data.get("statusUpdatedAt")),
                 tokens=tokens if isinstance(tokens, int) else None,
-                color=job_state.get("color"),
+                # The job state is authoritative when it exists; the transcript is
+                # the only source for everything else.
+                color=job_state.get("color") or self._session_colour(session_id),
                 attach=self._attach_for(data.get("kind"), job_id),
                 source=self.name,
                 extra={
