@@ -125,6 +125,34 @@ parent's session id — and, for Claude Code, its messaging socket and token —
 registers under the parent's name. Since launching from inside an agent is the obvious
 way to try this, that was the common case rather than an edge case.
 
+## Reading the list
+
+**Colours come from the harness, not from agentview.** Claude Code assigns each
+background session a colour; agentview carries it through to the agent's name and the
+row's left edge, so a session you recognise in `claude agents` looks the same here. The
+status dot keeps meaning status — busy, idle, blocked, stuck — because that is the
+question the HUD exists to answer.
+
+Sessions with no colour recorded stay neutral rather than getting an invented one. In
+practice that means interactive sessions: Claude Code stores a colour for background
+jobs in `jobs/<id>/state.json`, but a `/color` set in an interactive session leaves
+nothing on disk to read.
+
+**Renaming is agentview's own label.** Click the pencil beside a name, type, press
+Enter. Clearing the field restores the original.
+
+The label does not rename the session in its harness, and that is deliberate rather
+than a shortcut. There is no supported way to do it from outside — Claude Code has no
+`rename` subcommand — and driving its `/rename` through the terminal would type into a
+live prompt, appending to whatever you had half-written or queueing a message to a busy
+agent. A viewer should not do that behind your back. So the harness's own name is kept
+alongside the label as `harness_name` and shown on hover, and labels live in
+`~/.agentview/names.json`.
+
+Labels are applied where every reader sees them, so `/v1/agents`, the grouped view and
+the TUI client cannot disagree about what a row is called. `--read-only` refuses
+renames for the same reason it refuses to launch agents.
+
 ## Zero dependencies, by hard requirement
 
 **Both the collector and the hub** are stdlib-only — enforced in CI against a bare

@@ -35,6 +35,7 @@ from agentview.collector.core import collect
 from agentview import harnesses
 from agentview import runner
 from agentview.hub.ptys import PtyManager
+from agentview.hub.nicknames import Nicknames
 from agentview.hub.registry import Registry
 
 WEB_ROOT = Path(__file__).parent / "web"
@@ -96,8 +97,11 @@ class HubState:
         local_context_id: Optional[str] = None,
         allow_input: bool = True,
         can_launch: bool = True,
+        nicknames: Optional[Nicknames] = None,
     ) -> None:
         self.registry = registry
+        #: agentview's own labels for agents. A read-only hub does not write them.
+        self.nicknames = nicknames
         self.token = token  # None => auth disabled
         self.ptys = ptys or PtyManager()
         #: Only agents in this context can be attached to; see resolve_attach().
@@ -106,6 +110,9 @@ class HubState:
         #: Whether the UI may start new agents. Off when the hub is read-only --
         #: a monitoring deployment should not be able to spawn processes.
         self.can_launch = can_launch and allow_input
+        #: Renaming mutates hub-side state, so a read-only hub refuses it for the
+        #: same reason it refuses launching.
+        self.can_rename = allow_input and nicknames is not None
 
     def resolve_attach(self, agent_id: str):
         """(argv, error) for an agent, enforcing what this hub can actually reach.
@@ -232,7 +239,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/v1/harnesses":
             return self._json(200, {"harnesses": available_harnesses(),
-                                    "can_launch": self.state.can_launch})
+                                    "can_launch": self.state.can_launch,
+                                    "can_rename": self.state.can_rename})
 
         if path == "/v1/view":
             return self._json(200, self.state.registry.view())
@@ -280,6 +288,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(500, {"error": str(exc)})
             return self._json(200, {"ok": True, "session": session,
                                     "harness": match["harness"]})
+
+        if parsed.path == "/v1/rename":
+            if not self.state.can_rename:
+                return self._json(403, {"error": "renaming is disabled on this hub"})
+            agent_id = str(payload.get("id") or "")
+            if not agent_id:
+                return self._json(400, {"error": "missing agent id"})
+            if self.state.registry.find_agent(agent_id) is None:
+                return self._json(404, {"error": "no such agent"})
+            label = self.state.nicknames.set(agent_id, payload.get("name"))
+            return self._json(200, {"ok": True, "name": label})
 
         if parsed.path == "/v1/snapshot":
             self.state.registry.ingest(payload)
@@ -401,7 +420,14 @@ class Handler(BaseHTTPRequestHandler):
         if not authorized:
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
-        blocks = [self._data_block("bootstrap", self.state.registry.view())]
+        blocks = [
+            self._data_block("bootstrap", self.state.registry.view()),
+            # Capabilities go in the first frame too. Learning them from the async
+            # /v1/harnesses fetch left the per-row controls missing until the next
+            # poll, which reads as "the feature isn't there" rather than "not yet".
+            self._data_block("caps", {"can_launch": self.state.can_launch,
+                                      "can_rename": self.state.can_rename}),
+        ]
 
         # For a ?open=<agent id> deep link, hand over the terminal's current screen
         # as well, so it paints immediately instead of sitting blank until the agent
@@ -501,7 +527,10 @@ def main(argv=None) -> int:
         return 2
 
     token = None if args.no_auth else (args.token or load_or_create_token())
-    registry = Registry(ttl=args.ttl, stuck_after=args.stuck_after)
+    nicknames = Nicknames()
+    registry = Registry(
+        ttl=args.ttl, stuck_after=args.stuck_after, nickname_fn=nicknames.get
+    )
     local_ctx = context_mod.detect(parent_id=args.parent, label=args.label)
     Handler.state = HubState(
         registry,
@@ -509,6 +538,7 @@ def main(argv=None) -> int:
         local_context_id=None if args.no_local else local_ctx.id,
         allow_input=not args.read_only,
         can_launch=not args.no_launch,
+        nicknames=nicknames,
     )
     Handler.verbose = args.verbose
 

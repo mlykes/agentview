@@ -16,6 +16,22 @@
   --badge-bg: #eef2fb;
   --badge-ink: #3355b8;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Session colours, as the harness assigns them. Names come from the harness, so
+     the set is open-ended -- an unknown name falls back to the default ink rather
+     than to some arbitrary colour. Tuned for contrast on the light panel. */
+  --sc-red: #c9372c;
+  --sc-orange: #b45309;
+  --sc-yellow: #96700a;
+  --sc-green: #1a7f45;
+  --sc-teal: #0f766e;
+  --sc-cyan: #0e7490;
+  --sc-blue: #2c5fd0;
+  --sc-purple: #7038c8;
+  --sc-magenta: #a21caf;
+  --sc-pink: #c02a7a;
+  --sc-gray: #6b7280;
+  --sc-grey: #6b7280;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -34,6 +50,20 @@
     --accent: #6f9bff;
     --badge-bg: #1d2740;
     --badge-ink: #8fb0ff;
+
+    /* Lifted for legibility on the dark panel; same hues. */
+    --sc-red: #ff6b63;
+    --sc-orange: #f0a355;
+    --sc-yellow: #e3c04a;
+    --sc-green: #43d489;
+    --sc-teal: #2dd4bf;
+    --sc-cyan: #38bdf8;
+    --sc-blue: #6f9bff;
+    --sc-purple: #b48bff;
+    --sc-magenta: #e879f9;
+    --sc-pink: #f472b6;
+    --sc-gray: #9aa7b8;
+    --sc-grey: #9aa7b8;
   }
 }
 
@@ -120,7 +150,27 @@ body.with-terminal .ctx-head { padding: 8px 12px; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
 @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none } }
 
-.name { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name { font-weight: 560; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.name .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The session's own colour, carried on the row's left edge so it survives the
+   narrow column where the name is truncated first. */
+.agent { border-left: 3px solid transparent; }
+
+.rename {
+  border: 0; background: none; padding: 0 2px; cursor: pointer; font: inherit;
+  font-size: 11px; line-height: 1; color: var(--ink-3);
+  /* Faint but present: hover-only would be undiscoverable on a HUD you scan
+     rather than explore. */
+  opacity: .35; transition: opacity .12s ease; flex: 0 0 auto;
+}
+.agent:hover .rename, .rename:focus { opacity: 1; }
+.rename:hover { color: var(--accent); }
+.name input {
+  font: inherit; font-weight: 560; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 4px;
+  padding: 1px 5px; min-width: 0; width: 100%;
+}
 .badge {
   font-size: 11px; padding: 2px 7px; border-radius: 5px;
   background: var(--badge-bg); color: var(--badge-ink);
@@ -228,7 +278,9 @@ body.with-terminal .footer { display: none; }
 
 /* the row whose terminal is open */
 .agent.active { background: var(--badge-bg); }
-.agent.active .name { color: var(--accent); }
+/* No colour override here: a row that is open still shows its session colour, and
+   the active background already says which one is open. */
+.agent.active .name .label:not([style*="color"]) { color: var(--accent); }
 
 @media (max-width: 900px) {
   .workspace { flex-direction: column; height: auto; }

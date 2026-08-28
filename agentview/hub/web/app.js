@@ -64,8 +64,23 @@
     var state = agent.stuck ? "stuck" : agent.status;
     row.appendChild(el("span", "dot " + state));
 
-    var name = el("div", "name", agent.name || "(unnamed)");
-    name.title = agent.name || "";
+    // The harness assigns each session a colour; carry it through rather than
+    // inventing one. The dot already means status, so the colour goes on the name
+    // and the row's left edge.
+    var colour = agent.color ? String(agent.color).toLowerCase().replace(/[^a-z]/g, "") : "";
+
+    var name = el("div", "name");
+    var label = el("span", "label", agent.name || "(unnamed)");
+    if (colour) {
+      // Unknown colour names fall back to inherit rather than to something invented.
+      label.style.color = "var(--sc-" + colour + ", inherit)";
+      row.style.borderLeftColor = "var(--sc-" + colour + ", transparent)";
+    }
+    name.appendChild(label);
+    name.title = agent.harness_name
+      ? agent.name + "  (" + agent.harness_label + " calls it \"" + agent.harness_name + "\")"
+      : (agent.name || "");
+    if (canRename) name.appendChild(renameButton(agent, name, label));
     row.appendChild(name);
 
     var badge = el("span", "badge", agent.harness_label || agent.harness);
@@ -103,6 +118,62 @@
       row.appendChild(el("div", "no-attach", agent.attach.reason));
     }
     return row;
+  }
+
+  function renameButton(agent, nameCell, label) {
+    var btn = el("button", "rename", "\u270e");
+    btn.type = "button";
+    btn.title = "rename in agentview (clear the field to restore the original name)";
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();  // the row itself opens the terminal
+      startRename(agent, nameCell, label);
+    });
+    return btn;
+  }
+
+  function startRename(agent, nameCell, label) {
+    if (editing) return;
+    editing = agent.id;
+
+    var input = document.createElement("input");
+    input.type = "text";
+    input.value = agent.name || "";
+    input.maxLength = 64;
+    input.addEventListener("click", function (ev) { ev.stopPropagation(); });
+
+    var done = false;
+    function finish(commit) {
+      if (done) return;
+      done = true;
+      editing = null;
+      if (commit) submitRename(agent.id, input.value);
+      else tick();  // rebuild from server state
+    }
+
+    input.addEventListener("keydown", function (ev) {
+      ev.stopPropagation();
+      if (ev.key === "Enter") finish(true);
+      else if (ev.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", function () { finish(true); });
+
+    nameCell.replaceChild(input, label);
+    input.focus();
+    input.select();
+  }
+
+  function submitRename(id, value) {
+    var headers = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = "Bearer " + token;
+    fetch("/v1/rename", {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify({ id: id, name: value })
+    })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (res) { if (res && res.error) setConn(false, res.error); })
+      .catch(function () { setConn(false, "rename failed"); })
+      .then(function () { tick(); });
   }
 
   function contextCard(node, isChild) {
@@ -166,6 +237,8 @@
 
   function render(view) {
     renderTotals(view.totals);
+    // Rebuilding now would blow away the input the user is typing into.
+    if (editing) return;
     root.textContent = "";
     if (!view.contexts.length) {
       root.appendChild(el("div", "empty", "No collectors reporting yet."));
@@ -210,13 +283,23 @@
   var launchBtn = document.getElementById("launch-btn");
   var launchMenu = document.getElementById("launch-menu");
   var pendingSession = null;
+  //: Whether this hub accepts renames; a read-only hub does not.
+  var canRename = false;
+  //: Agent id currently being renamed. render() rebuilds the whole list, so an open
+  //: editor would be destroyed by the next poll tick unless we hold off.
+  var editing = null;
 
   function loadHarnesses() {
     fetch("/v1/harnesses" + (token ? "?t=" + encodeURIComponent(token) : ""),
           { headers: token ? { Authorization: "Bearer " + token } : {} })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data || !data.can_launch) return;
+        if (!data) return;
+        if (!!data.can_rename !== canRename) {
+          canRename = !!data.can_rename;
+          tick();  // repaint now rather than leaving the controls missing for a poll
+        }
+        if (!data.can_launch) return;
         launchWrap.hidden = false;
         launchMenu.textContent = "";
         if (!data.harnesses.length) {
@@ -462,6 +545,15 @@
 
   // Render the server-injected snapshot immediately so the first frame has real
   // content. Falls through to polling either way.
+  try {
+    // Capabilities first: agentRow() reads canRename, so learning it after the
+    // first render would leave the controls missing until the next poll.
+    var caps = document.getElementById("caps");
+    if (caps && caps.textContent) canRename = !!JSON.parse(caps.textContent).can_rename;
+  } catch (e) {
+    /* the /v1/harnesses fetch below still settles it */
+  }
+
   try {
     var boot = document.getElementById("bootstrap");
     if (boot && boot.textContent) {

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 #: A context is dropped if we have not heard from its collector in this long.
 #: Three snapshot intervals, so one missed tick does not make agents flicker.
@@ -31,11 +31,15 @@ class Registry:
         self,
         ttl: float = DEFAULT_TTL_SECONDS,
         stuck_after: float = DEFAULT_STUCK_SECONDS,
+        nickname_fn: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         self._lock = threading.Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self.ttl = ttl
         self.stuck_after = stuck_after
+        #: Looks up agentview's own label for an agent. Applied in _annotate so that
+        #: every read path -- the UI view, /v1/agents, the TUI -- agrees on the name.
+        self._nickname_fn = nickname_fn
 
     def ingest(self, snapshot: Dict[str, Any]) -> None:
         """Accept a snapshot from one collector, replacing that context's view."""
@@ -144,6 +148,14 @@ class Registry:
             and idle_for is not None
             and idle_for > self.stuck_after
         )
+        if self._nickname_fn is not None:
+            label = self._nickname_fn(agent.get("id"))
+            if label:
+                # Keep what the harness calls it. The label is agentview's, and a
+                # row that quietly disagreed with `claude agents` would be worse
+                # than one that shows both.
+                agent["harness_name"] = agent.get("name")
+                agent["name"] = label
         return agent
 
     def flat_agents(self) -> List[Dict[str, Any]]:
