@@ -31,6 +31,16 @@
   var connEl = document.getElementById("conn");
   var connText = document.getElementById("conn-text");
 
+  function terminalInput(data) {
+    // xterm.js answers a secondary device-attributes query with a sequence such as
+    // ESC[>0;276;0c. Our input path is an asynchronous HTTP request, so tmux can
+    // time out waiting for that answer and then pass the late reply through to the
+    // application as typed text. Codex consequently showed "0;276;0c" in its
+    // composer. This reply only identifies the browser terminal implementation; it
+    // is safe to discard, unlike ordinary keys and cursor/colour reports.
+    return data.replace(/\x1b\[>[0-9;]*c/g, "");
+  }
+
   function el(tag, cls, text) {
     var node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -274,6 +284,21 @@
     post("/v1/rename", { id: id, name: value });
   }
 
+  // The leading directories are context; the last segment is the answer to "which
+  // repo is this". Splitting them lets the stylesheet dim the prefix so the eye
+  // lands on the directory name at a glance.
+  function dirPath(label) {
+    var wrap = el("span", "dir-path");
+    var cut = label.lastIndexOf("/");
+    if (cut > 0 && cut < label.length - 1) {
+      wrap.appendChild(el("span", "dir-parent", label.slice(0, cut + 1)));
+      wrap.appendChild(el("span", "dir-leaf", label.slice(cut + 1)));
+    } else {
+      wrap.appendChild(el("span", "dir-leaf", label));
+    }
+    return wrap;
+  }
+
   function byDirectory(agents) {
     var groups = {};
     var order = [];
@@ -317,7 +342,7 @@
     } else {
       byDirectory(node.agents).forEach(function (group) {
         var head = el("div", "dir-head");
-        head.appendChild(el("span", "dir-path", group.label));
+        head.appendChild(dirPath(group.label));
         head.title = group.cwd || "";
         head.appendChild(el("span", "dir-count",
           group.agents.length + " agent" + (group.agents.length === 1 ? "" : "s")));
@@ -588,7 +613,10 @@
     // replies tmux waits on alike. This is a terminal; it behaves like one.
     term.onData(function (data) {
       if (!current) return;
-      api("/v1/attach/" + encodeURIComponent(current.id) + "/input", { d: data });
+      data = terminalInput(data);
+      if (data) {
+        api("/v1/attach/" + encodeURIComponent(current.id) + "/input", { d: data });
+      }
     });
 
     // Paint the current screen from the server-injected block when this page was

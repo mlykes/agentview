@@ -1,20 +1,22 @@
 /* Light is the base; dark is a token swap so the whole HUD flips together. */
 :root {
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --panel-2: #fbfbfd;
-  --ink: #14171c;
-  --ink-2: #5b6472;
-  --ink-3: #8c97a6;
-  --line: #e3e7ed;
-  --line-2: #eef1f5;
+  --bg: #e7eaef;
+  --panel: #f6f7f9;
+  --panel-2: #eceff4;
+  /* One step further from the panel than the old greys: the counts and paths
+     below lean on ink-2/ink-3 and were washing out against white. */
+  --ink: #161a20;
+  --ink-2: #4d5664;
+  --ink-3: #78828f;
+  --line: #ccd3dc;
+  --line-2: #dde2e9;
   --busy: #1a9c5b;
   --idle: #97a2b1;
   --blocked: #d08512;
   --stuck: #d1443f;
-  --accent: #3b6cf0;
-  --badge-bg: #eef2fb;
-  --badge-ink: #3355b8;
+  --accent: #3760d4;
+  --badge-bg: #e4eaf7;
+  --badge-ink: #2f4fa8;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
   /* Session colours, as the harness assigns them. Names come from the harness, so
@@ -38,11 +40,11 @@
     --bg: #0e1116;
     --panel: #161b22;
     --panel-2: #1b212a;
-    --ink: #e7edf5;
-    --ink-2: #9aa7b8;
-    --ink-3: #6e7c8f;
-    --line: #262d38;
-    --line-2: #1f2530;
+    --ink: #dde4ee;
+    --ink-2: #a3b0c1;
+    --ink-3: #78859a;
+    --line: #303947;
+    --line-2: #262e3a;
     --busy: #2fd07c;
     --idle: #6e7c8f;
     --blocked: #e0a03c;
@@ -90,9 +92,9 @@ body {
   background: var(--accent);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
 }
-.totals { display: flex; gap: 16px; color: var(--ink-2); font-size: 13px; margin-left: auto; }
-.totals b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-.totals .warn { color: var(--stuck); font-weight: 600; }
+.totals { display: flex; gap: 16px; color: var(--ink-2); font-size: 13px; margin-left: auto; font-weight: 520; }
+.totals b { color: var(--ink); font-weight: 680; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.totals .warn, .totals .warn b { color: var(--stuck); font-weight: 680; }
 .conn { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-3); }
 .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
 .conn.ok .conn-dot { background: var(--busy); }
@@ -132,7 +134,13 @@ body.with-terminal .ctx-head { padding: 8px 12px; }
 }
 .ctx-label { font-weight: 620; font-size: 14px; }
 .ctx-meta { color: var(--ink-3); font-size: 12px; font-family: var(--mono); }
-.ctx-count { margin-left: auto; color: var(--ink-3); font-size: 12px; }
+.ctx-count { margin-left: auto; }
+.ctx-count, .dir-count {
+  font-size: 11px; font-weight: 600; color: var(--ink-2);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line);
+}
 .ctx.child { margin: 0 0 0 26px; border-left: 2px solid var(--line); border-radius: 0 8px 8px 0; }
 .children { padding: 10px 12px 12px 0; }
 
@@ -153,15 +161,31 @@ body.with-terminal .ctx-head { padding: 8px 12px; }
 /* Agents are grouped by working directory: the question "what is running in this
    repo" is asked far more often than "what is running on this host". */
 .dir-head {
-  display: flex; align-items: baseline; gap: 8px;
-  padding: 7px 15px 6px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 15px;
   background: var(--panel-2);
+  /* The seam, not a hairline: one directory's last agent used to sit a single
+     faint line away from the next directory's heading, so the groups ran
+     together. The heavy rule above, the light one below, and the accent stub
+     make the break obvious while scanning. */
+  border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line-2);
+  box-shadow: inset 0 2px 0 -1px var(--line), inset 3px 0 0 var(--accent);
   font-family: var(--mono); font-size: 12px; color: var(--ink-2);
 }
-.dir-head .dir-count { margin-left: auto; font-family: inherit; color: var(--ink-3); }
+/* The card heading already draws the top edge; a second rule there reads as a
+   double line rather than a separator. */
+.ctx-head + .dir-head { border-top: 0; box-shadow: inset 3px 0 0 var(--accent); }
+.dir-path {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink); font-weight: 600; font-size: 12.5px; letter-spacing: -0.01em;
+}
+/* Everything above the working directory is context; the directory itself is
+   what you are looking for, so only it gets full ink. */
+.dir-path .dir-parent { color: var(--ink-3); font-weight: 500; }
+.dir-head .dir-count { margin-left: auto; font-family: inherit; }
 .dir-head + .agent { border-top: 0; }
-body.with-terminal .dir-head { padding: 6px 12px; }
+body.with-terminal .dir-head { padding: 7px 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); align-self: center; }
 .dot.busy { background: var(--busy); animation: pulse 1.8s ease-in-out infinite; }
 .dot.blocked { background: var(--blocked); }
@@ -233,8 +257,8 @@ body.with-terminal .dir-head { padding: 6px 12px; }
   background: var(--badge-bg); color: var(--badge-ink);
   font-weight: 560; white-space: nowrap; justify-self: start;
 }
-.cwd { font-family: var(--mono); font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.branch-cell { font-family: var(--mono); font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cwd { font-family: var(--mono); font-size: 12px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-cell { font-family: var(--mono); font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch { color: var(--ink-3); }
 .right { display: flex; gap: 12px; align-items: baseline; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; justify-self: end; }
 .status-word { text-transform: lowercase; }

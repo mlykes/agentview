@@ -75,6 +75,8 @@ server-side.
 
 Supported today:
 - **Claude Code** — rich adapter reading its session registry
+- **Codex** — interactive threads from the same local store as `codex resume --all`;
+  opening one runs `codex resume <thread-id>`
 - **Any harness running in tmux** — recognised by process name from a table you can
   extend in `~/.agentview/harnesses.json`, no code change
 - **Anything else** — write a heartbeat file to `~/.agentview/agents/*.json`
@@ -102,6 +104,7 @@ Agents reach their terminal by one of two routes, picked per session:
 |---|---|
 | running inside tmux | `tmux attach -t <session>` — the terminal it already draws |
 | Claude Code background agent | `claude attach <job id>` — a fresh client onto the running session |
+| Codex resumable session | `codex resume <thread id>` — opens the saved thread in a client |
 | started in a bare terminal | not attachable |
 
 Background agents have no controlling terminal at all (`ps` reports tty `??`), so there

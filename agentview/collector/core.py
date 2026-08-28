@@ -14,6 +14,7 @@ from agentview.collector import tmux
 from agentview.collector.adapters.tmux_adapter import attach_for_session
 from agentview.collector.adapters.base import Adapter
 from agentview.collector.adapters.claude_code import ClaudeCodeAdapter
+from agentview.collector.adapters.codex import CodexAdapter
 from agentview.collector.adapters.heartbeat import HeartbeatAdapter
 from agentview.collector.adapters.tmux_adapter import TmuxAdapter
 from agentview.model import AgentRecord, ContextRef, Snapshot
@@ -29,7 +30,12 @@ def default_adapters(config_dir: Optional[Path] = None) -> List[Adapter]:
     M5 adds the generic tmux/process/heartbeat adapters here; the merge below
     already handles them.
     """
-    return [ClaudeCodeAdapter(config_dir=config_dir), TmuxAdapter(), HeartbeatAdapter()]
+    return [
+        ClaudeCodeAdapter(config_dir=config_dir),
+        CodexAdapter(),
+        TmuxAdapter(),
+        HeartbeatAdapter(),
+    ]
 
 
 def merge(groups: List[List[AgentRecord]]) -> List[AgentRecord]:
