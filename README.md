@@ -179,6 +179,19 @@ records when `/color` ran, and the swatch records when you clicked it. If one so
 simply always overruled the other, changing the colour in the losing place would appear
 to do nothing.
 
+A colour set from the list is also **pushed into the session itself**, so the two do
+not just agree in the HUD — `claude agents` and the session's own UI show it too.
+
+There is no API for that and no `claude color` subcommand, so the only route is typing
+`/color` into the terminal. agentview does not do that the moment you click: it waits
+until the next time you open that agent's terminal, so you are looking at the session
+when text appears in it. The swatch shows a ring while a colour is waiting to be sent.
+
+Two things it will not do. It skips a **busy** agent — the text would sit in the prompt
+and be submitted as a message when the turn ended — and keeps the colour queued for
+next time. And it sends Ctrl-U first, so the command cannot be appended to a half-typed
+draft; that does discard such a draft, which is the cost of the feature.
+
 The displaced value is kept as `harness_color` and shown on hover, so you can see what
 the session itself says. Clearing the swatch colour falls back to the session's.
 

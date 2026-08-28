@@ -89,6 +89,38 @@ def available_harnesses():
     return unique
 
 
+#: How long to let a terminal paint before typing into it. tmux redraws on
+#: attach, but a freshly started `claude attach` client needs a moment before
+#: it has a prompt to receive the command.
+COLOUR_PUSH_DELAY = 1.5
+
+
+def colour_to_push(agent, overrides, agent_id: str) -> Optional[str]:
+    """The colour owed to a session's own UI, or None to leave it alone.
+
+    A colour set in the list cannot reach the agent by itself -- there is no API for
+    it, and `color` is not a `claude` subcommand -- so the only route is typing into
+    the terminal. Doing that when the swatch is clicked would type into a session
+    nobody is looking at; deferring it to the next attach means the user is watching
+    when it happens.
+
+    Refused while the agent is busy: the text would sit in the prompt and be
+    submitted as a message when the turn ended. It stays queued for the next attach.
+    Refused for other harnesses, which have no `/color`.
+    """
+    if agent is None or agent.get("harness") != "claude-code":
+        return None
+    if agent.get("status") == "busy":
+        return None
+    return overrides.take_pending_colour(agent_id)
+
+
+def colour_keystrokes(colour: str) -> bytes:
+    """Ctrl-U first: without it the command is appended to whatever draft is sitting
+    in the prompt and run as one line."""
+    return b"\x15/color " + colour.encode("ascii", "ignore") + b"\r"
+
+
 class HubState:
     def __init__(
         self,
@@ -306,7 +338,9 @@ class Handler(BaseHTTPRequestHandler):
             # An unknown colour clears the override rather than being stored: the
             # value becomes part of a CSS custom property name, and one we have no
             # token for would render as no colour at all.
-            colour = self.state.overrides.set_colour(agent_id, payload.get("color"))
+            colour = self.state.overrides.set_colour(
+                agent_id, payload.get("color"), push=True
+            )
             return self._json(200, {"ok": True, "color": colour})
 
         if parsed.path == "/v1/stop":
@@ -388,6 +422,7 @@ class Handler(BaseHTTPRequestHandler):
         # An existing session was sized by whoever opened it first. Resize on every
         # connect so the terminal matches this window rather than a stale one.
         session.resize(cols, rows)
+        self._push_colour(agent_id, session)
 
         queue = []
         event = threading.Event()
@@ -430,6 +465,21 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             session.unsubscribe(sub_id)
             self._sse_end()
+
+    def _push_colour(self, agent_id: str, session) -> None:
+        """Type `/color` into a session agentview was told to recolour."""
+        if self.state.overrides is None:
+            return
+        agent = self.state.registry.find_agent(agent_id)
+        colour = colour_to_push(agent, self.state.overrides, agent_id)
+        if not colour:
+            return
+        keys = colour_keystrokes(colour)
+        # After the terminal has painted -- tmux redraws on attach, and a fresh
+        # `claude attach` client needs a moment before it has a prompt to type into.
+        timer = threading.Timer(COLOUR_PUSH_DELAY, lambda: session.write(keys))
+        timer.daemon = True
+        timer.start()
 
     def _sse(self, data: bytes) -> None:
         """Terminal output is arbitrary bytes; base64 keeps it safe through SSE's

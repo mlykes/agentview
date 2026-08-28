@@ -158,9 +158,14 @@
     var colour = agent.color ? String(agent.color).toLowerCase().replace(/[^a-z]/g, "") : "";
     var btn = el("button", "swatch" + (colour ? "" : " none"));
     btn.type = "button";
-    btn.title = colour
-      ? "colour: " + colour + " -- click to change"
-      : "set a colour for this agent";
+    btn.title = agent.color_pending
+      // A colour set here reaches the session by being typed into its terminal, so
+      // it waits until there is one open. Say so rather than leaving it a mystery.
+      ? "colour: " + colour + " -- applies in the session when you open its terminal"
+      : colour
+        ? "colour: " + colour + " -- click to change"
+        : "set a colour for this agent";
+    if (agent.color_pending) btn.className += " pending";
     if (colour) btn.style.background = "var(--sc-" + colour + ", transparent)";
     btn.addEventListener("click", function (ev) {
       ev.stopPropagation();  // the row itself opens the terminal

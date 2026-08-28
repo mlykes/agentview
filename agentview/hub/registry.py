@@ -175,6 +175,9 @@ class Registry:
                     if theirs:
                         agent["harness_color"] = theirs
                     agent["color"] = override["color"]
+            if override.get("color_pending"):
+                # The UI says so rather than leaving the delay unexplained.
+                agent["color_pending"] = True
         return agent
 
     def flat_agents(self) -> List[Dict[str, Any]]:

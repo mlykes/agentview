@@ -107,6 +107,8 @@ class Overrides:
             at = value.get("color_at")
             if isinstance(at, (int, float)) and at > 0:
                 entry["color_at"] = float(at)
+            if value.get("color_pending"):
+                entry["color_pending"] = True
         return entry
 
     def _load(self) -> Dict[str, Dict[str, str]]:
@@ -146,6 +148,22 @@ class Overrides:
         with self._lock:
             return dict(self._entries.get(agent_id) or {})
 
+    def take_pending_colour(self, agent_id: str) -> Optional[str]:
+        """The colour still owed to the session, cleared as it is handed over.
+
+        Cleared on the way out rather than after a successful write: a colour that
+        failed to reach the session should not be retried on every reconnect, since
+        each attempt types into a live prompt.
+        """
+        with self._lock:
+            entry = self._entries.get(agent_id)
+            if not entry or not entry.get("color_pending"):
+                return None
+            colour = entry.get("color")
+            entry.pop("color_pending", None)
+            self._save()
+            return colour
+
     def all(self) -> Dict[str, Dict[str, str]]:
         with self._lock:
             return {k: dict(v) for k, v in self._entries.items()}
@@ -172,7 +190,9 @@ class Overrides:
         """Set a label, or clear it when ``name`` is empty."""
         return self._set(agent_id, "name", clean_name(name))
 
-    def set_colour(self, agent_id: str, colour: Optional[str]) -> Optional[str]:
+    def set_colour(
+        self, agent_id: str, colour: Optional[str], push: bool = False
+    ) -> Optional[str]:
         """Set a colour, or clear it to fall back to the harness's own.
 
         Stamped with the time, so a colour set here and one set with `/color` in the
@@ -186,9 +206,15 @@ class Overrides:
             if value is None:
                 entry.pop("color", None)
                 entry.pop("color_at", None)
+                entry.pop("color_pending", None)
             else:
                 entry["color"] = value
                 entry["color_at"] = time.time()
+                # Queued for the session itself. Setting a colour here cannot reach
+                # the agent until there is a terminal to type it into, so it waits
+                # for the next time one is opened rather than being lost.
+                if push:
+                    entry["color_pending"] = True
             if entry:
                 self._entries[agent_id] = entry
             else:

@@ -199,6 +199,8 @@ body.with-terminal .dir-head { padding: 6px 12px; }
 }
 .agent:hover .swatch, .swatch:focus { opacity: 1; }
 .swatch.none { border-style: dashed; border-color: var(--ink-3); }
+/* Queued to be typed into the session the next time its terminal is open. */
+.swatch.pending { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--ink-3); }
 
 .swatch-menu {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 20;
