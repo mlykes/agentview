@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agentview.hub.nicknames import Nicknames
+from agentview.hub.overrides import Overrides
 from agentview.hub.registry import Registry
 from agentview.hub.server import Handler, HubState
 
@@ -42,8 +42,8 @@ class RenameServerBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = TemporaryDirectory()
-        cls.nicknames = Nicknames(Path(cls.tmp.name) / "names.json")
-        registry = Registry(nickname_fn=cls.nicknames.get)
+        cls.overrides = Overrides(Path(cls.tmp.name) / "names.json")
+        registry = Registry(override_fn=cls.overrides.get)
         registry.ingest({
             "context": {"id": "h1", "label": "test-host", "kind": "host",
                         "platform": "linux", "arch": "x86_64", "parent_id": None},
@@ -52,7 +52,7 @@ class RenameServerBase(unittest.TestCase):
             "collected_at": 0,
         })
         Handler.state = HubState(
-            registry, TOKEN, allow_input=cls.allow_input, nicknames=cls.nicknames
+            registry, TOKEN, allow_input=cls.allow_input, overrides=cls.overrides
         )
         Handler.verbose = False
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -92,7 +92,8 @@ class RenameServerBase(unittest.TestCase):
 
 class RenameTest(RenameServerBase):
     def tearDown(self):
-        self.nicknames.set("h1:x:1", None)
+        self.overrides.set_name("h1:x:1", None)
+        self.overrides.set_colour("h1:x:1", None)
 
     def test_rename_changes_the_name_every_reader_sees(self):
         status, body = self.post("/v1/rename", {"id": "h1:x:1", "name": "the api one"})
@@ -130,9 +131,42 @@ class RenameTest(RenameServerBase):
         self.assertEqual(status, 401)
         self.assertEqual(self.agent()["name"], "session-abc")
 
-    def test_the_page_is_told_renaming_is_available(self):
+    def test_setting_a_colour_shows_up_on_the_row(self):
+        """The reason this endpoint exists: Claude Code records no colour for an
+        interactive session, nor for a background one with no state.json, so there
+        is nothing to inherit and the row would stay uncoloured forever."""
+        status, body = self.post("/v1/color", {"id": "h1:x:1", "color": "red"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["color"], "red")
+        self.assertEqual(self.agent()["color"], "red")
+
+    def test_an_unknown_colour_is_refused_rather_than_stored(self):
+        self.post("/v1/color", {"id": "h1:x:1", "color": "teal"})
+        status, body = self.post("/v1/color", {"id": "h1:x:1", "color": "chartreuse"})
+        self.assertEqual(status, 200)
+        self.assertIsNone(body["color"])
+        self.assertIsNone(self.agent().get("color"))
+
+    def test_clearing_a_colour_falls_back(self):
+        self.post("/v1/color", {"id": "h1:x:1", "color": "blue"})
+        self.post("/v1/color", {"id": "h1:x:1", "color": ""})
+        self.assertIsNone(self.agent().get("color"))
+
+    def test_colour_requires_a_token(self):
+        status, _ = self.post("/v1/color", {"id": "h1:x:1", "color": "red"}, token=None)
+        self.assertEqual(status, 401)
+
+    def test_colouring_an_unknown_agent_is_refused(self):
+        status, _ = self.post("/v1/color", {"id": "h1:x:nope", "color": "red"})
+        self.assertEqual(status, 404)
+
+    def test_the_palette_is_published_so_the_page_cannot_drift(self):
         _, body = get(self.base + "/v1/harnesses", TOKEN)
-        self.assertTrue(json.loads(body)["can_rename"])
+        self.assertIn("red", json.loads(body)["colours"])
+
+    def test_the_page_is_told_editing_is_available(self):
+        _, body = get(self.base + "/v1/harnesses", TOKEN)
+        self.assertTrue(json.loads(body)["can_edit"])
 
     def test_capabilities_are_in_the_first_frame(self):
         """The page reads these before its first render. Learning them only from
@@ -141,7 +175,7 @@ class RenameTest(RenameServerBase):
         _, html = get(self.base + "/?t=" + TOKEN, TOKEN)
         self.assertIn('id="caps"', html)
         block = html.split('id="caps">', 1)[1].split("</script>", 1)[0]
-        self.assertTrue(json.loads(block)["can_rename"])
+        self.assertTrue(json.loads(block)["can_edit"])
 
 
 class ReadOnlyRenameTest(RenameServerBase):
@@ -150,20 +184,25 @@ class ReadOnlyRenameTest(RenameServerBase):
 
     allow_input = False
 
+    def test_colour_is_refused(self):
+        status, body = self.post("/v1/color", {"id": "h1:x:1", "color": "red"})
+        self.assertEqual(status, 403)
+        self.assertIsNone(self.agent().get("color"))
+
     def test_rename_is_refused(self):
         status, body = self.post("/v1/rename", {"id": "h1:x:1", "name": "nope"})
         self.assertEqual(status, 403)
         self.assertIn("disabled", body["error"])
         self.assertEqual(self.agent()["name"], "session-abc")
 
-    def test_the_page_is_told_renaming_is_unavailable(self):
+    def test_the_page_is_told_editing_is_unavailable(self):
         _, body = get(self.base + "/v1/harnesses", TOKEN)
-        self.assertFalse(json.loads(body)["can_rename"])
+        self.assertFalse(json.loads(body)["can_edit"])
 
     def test_the_first_frame_says_so_too(self):
         _, html = get(self.base + "/?t=" + TOKEN, TOKEN)
         block = html.split('id="caps">', 1)[1].split("</script>", 1)[0]
-        self.assertFalse(json.loads(block)["can_rename"])
+        self.assertFalse(json.loads(block)["can_edit"])
 
 
 if __name__ == "__main__":

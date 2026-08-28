@@ -77,10 +77,18 @@
       row.style.borderLeftColor = "var(--sc-" + colour + ", transparent)";
     }
     name.appendChild(label);
-    name.title = agent.harness_name
-      ? agent.name + "  (" + agent.harness_label + " calls it \"" + agent.harness_name + "\")"
-      : (agent.name || "");
-    if (canRename) name.appendChild(renameButton(agent, name, label));
+    var notes = [];
+    if (agent.harness_name) {
+      notes.push(agent.harness_label + " calls it \"" + agent.harness_name + "\"");
+    }
+    if (agent.harness_color) {
+      notes.push(agent.harness_label + " colours it " + agent.harness_color);
+    }
+    name.title = notes.length ? agent.name + "  (" + notes.join("; ") + ")" : (agent.name || "");
+    if (canEdit) {
+      name.appendChild(swatchButton(agent, name));
+      name.appendChild(renameButton(agent, name, label));
+    }
     row.appendChild(name);
 
     var badge = el("span", "badge", agent.harness_label || agent.harness);
@@ -118,6 +126,75 @@
       row.appendChild(el("div", "no-attach", agent.attach.reason));
     }
     return row;
+  }
+
+  function swatchButton(agent, nameCell) {
+    var colour = agent.color ? String(agent.color).toLowerCase().replace(/[^a-z]/g, "") : "";
+    var btn = el("button", "swatch" + (colour ? "" : " none"));
+    btn.type = "button";
+    btn.title = colour
+      ? "colour: " + colour + " -- click to change"
+      : "set a colour for this agent";
+    if (colour) btn.style.background = "var(--sc-" + colour + ", transparent)";
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();  // the row itself opens the terminal
+      openColourMenu(agent, nameCell, btn);
+    });
+    return btn;
+  }
+
+  function openColourMenu(agent, nameCell, anchor) {
+    if (editing) return;
+    editing = agent.id;
+
+    var menu = el("div", "swatch-menu");
+    menu.addEventListener("click", function (ev) { ev.stopPropagation(); });
+
+    function close(commit, value) {
+      if (!menu.parentNode) return;
+      menu.parentNode.removeChild(menu);
+      document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onKey, true);
+      editing = null;
+      if (commit) submitColour(agent.id, value);
+      else tick();
+    }
+    function onOutside(ev) { if (!menu.contains(ev.target)) close(false); }
+    function onKey(ev) { if (ev.key === "Escape") close(false); }
+
+    palette.forEach(function (name) {
+      var dot = el("button", "swatch");
+      dot.type = "button";
+      dot.title = name;
+      dot.style.background = "var(--sc-" + name + ", transparent)";
+      dot.addEventListener("click", function () { close(true, name); });
+      menu.appendChild(dot);
+    });
+
+    // Clearing falls back to whatever the harness records, which for many sessions
+    // is nothing -- so this reads as "no colour" rather than "default colour".
+    var clear = el("button", "clear", "none");
+    clear.type = "button";
+    clear.addEventListener("click", function () { close(true, ""); });
+    menu.appendChild(clear);
+
+    nameCell.appendChild(menu);
+    document.addEventListener("mousedown", onOutside, true);
+    document.addEventListener("keydown", onKey, true);
+  }
+
+  function submitColour(id, value) {
+    post("/v1/color", { id: id, color: value });
+  }
+
+  function post(path, body) {
+    var headers = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = "Bearer " + token;
+    return fetch(path, { method: "POST", headers: headers, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (res) { if (res && res.error) setConn(false, res.error); })
+      .catch(function () { setConn(false, "update failed"); })
+      .then(function () { tick(); });
   }
 
   function renameButton(agent, nameCell, label) {
@@ -163,17 +240,7 @@
   }
 
   function submitRename(id, value) {
-    var headers = { "Content-Type": "application/json" };
-    if (token) headers.Authorization = "Bearer " + token;
-    fetch("/v1/rename", {
-      method: "POST",
-      headers: headers,
-      body: JSON.stringify({ id: id, name: value })
-    })
-      .then(function (r) { return r.json().catch(function () { return {}; }); })
-      .then(function (res) { if (res && res.error) setConn(false, res.error); })
-      .catch(function () { setConn(false, "rename failed"); })
-      .then(function () { tick(); });
+    post("/v1/rename", { id: id, name: value });
   }
 
   function contextCard(node, isChild) {
@@ -283,10 +350,13 @@
   var launchBtn = document.getElementById("launch-btn");
   var launchMenu = document.getElementById("launch-menu");
   var pendingSession = null;
-  //: Whether this hub accepts renames; a read-only hub does not.
-  var canRename = false;
-  //: Agent id currently being renamed. render() rebuilds the whole list, so an open
-  //: editor would be destroyed by the next poll tick unless we hold off.
+  //: Whether this hub accepts row edits; a read-only hub does not.
+  var canEdit = false;
+  //: Colour names the server has tokens for. Taken from the server rather than
+  //: hardcoded here, so the palette cannot drift out of sync with the stylesheet.
+  var palette = [];
+  //: Agent id currently being edited. render() rebuilds the whole list, so an open
+  //: editor or colour menu would be destroyed by the next poll tick unless we hold off.
   var editing = null;
 
   function loadHarnesses() {
@@ -295,8 +365,9 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (!data) return;
-        if (!!data.can_rename !== canRename) {
-          canRename = !!data.can_rename;
+        if (data.colours) palette = data.colours;
+        if (!!data.can_edit !== canEdit) {
+          canEdit = !!data.can_edit;
           tick();  // repaint now rather than leaving the controls missing for a poll
         }
         if (!data.can_launch) return;
@@ -546,10 +617,15 @@
   // Render the server-injected snapshot immediately so the first frame has real
   // content. Falls through to polling either way.
   try {
-    // Capabilities first: agentRow() reads canRename, so learning it after the
-    // first render would leave the controls missing until the next poll.
+    // Capabilities first: agentRow() reads canEdit and the palette, so learning
+    // them after the first render would leave the controls missing until the next
+    // poll -- indistinguishable from the feature not existing.
     var caps = document.getElementById("caps");
-    if (caps && caps.textContent) canRename = !!JSON.parse(caps.textContent).can_rename;
+    if (caps && caps.textContent) {
+      var parsed = JSON.parse(caps.textContent);
+      canEdit = !!parsed.can_edit;
+      palette = parsed.colours || [];
+    }
   } catch (e) {
     /* the /v1/harnesses fetch below still settles it */
   }

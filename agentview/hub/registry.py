@@ -31,15 +31,16 @@ class Registry:
         self,
         ttl: float = DEFAULT_TTL_SECONDS,
         stuck_after: float = DEFAULT_STUCK_SECONDS,
-        nickname_fn: Optional[Callable[[str], Optional[str]]] = None,
+        override_fn: Optional[Callable[[str], Dict[str, str]]] = None,
     ) -> None:
         self._lock = threading.Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self.ttl = ttl
         self.stuck_after = stuck_after
-        #: Looks up agentview's own label for an agent. Applied in _annotate so that
-        #: every read path -- the UI view, /v1/agents, the TUI -- agrees on the name.
-        self._nickname_fn = nickname_fn
+        #: Looks up agentview's own display settings for an agent. Applied in
+        #: _annotate so every read path -- the UI view, /v1/agents, the TUI --
+        #: agrees on what a row is called and what colour it is.
+        self._override_fn = override_fn
 
     def ingest(self, snapshot: Dict[str, Any]) -> None:
         """Accept a snapshot from one collector, replacing that context's view."""
@@ -148,14 +149,20 @@ class Registry:
             and idle_for is not None
             and idle_for > self.stuck_after
         )
-        if self._nickname_fn is not None:
-            label = self._nickname_fn(agent.get("id"))
-            if label:
+        if self._override_fn is not None:
+            override = self._override_fn(agent.get("id")) or {}
+            if override.get("name"):
                 # Keep what the harness calls it. The label is agentview's, and a
                 # row that quietly disagreed with `claude agents` would be worse
                 # than one that shows both.
                 agent["harness_name"] = agent.get("name")
-                agent["name"] = label
+                agent["name"] = override["name"]
+            if override.get("color"):
+                # The harness's own colour wins when it records one; this fills the
+                # gap for the sessions where it records nothing.
+                if agent.get("color"):
+                    agent["harness_color"] = agent["color"]
+                agent["color"] = override["color"]
         return agent
 
     def flat_agents(self) -> List[Dict[str, Any]]:
