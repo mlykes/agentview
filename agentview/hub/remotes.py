@@ -30,11 +30,12 @@ import io
 import json
 import os
 import shlex
-import subprocess
 import tarfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from agentview.hub.hosts import SshHost
 
 #: Where the collector is unpacked on the remote. Under ~/.agentview so it sits with
 #: the token and overrides rather than scattering files around $HOME.
@@ -44,13 +45,9 @@ REMOTE_CODE_DIR = "~/.agentview/code"
 #: host cannot stall the whole poll loop.
 SSH_TIMEOUT = 45.0
 
-#: Fail fast on an unreachable host instead of hanging the tick, and never prompt:
-#: a hub running in the background cannot answer a password or a host-key question.
-SSH_OPTS = [
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=10",
-    "-o", "StrictHostKeyChecking=accept-new",
-]
+#: One definition, shared with hosts.SshHost. Kept as a name here because the attach
+#: argv is built from it; two copies would drift the first time one is changed.
+SSH_OPTS = SshHost.OPTS
 
 
 def config_path() -> Path:
@@ -112,25 +109,11 @@ def login_shell_command(command: str) -> str:
 
 
 def ssh_argv(host: str, command: str, tty: bool = False) -> List[str]:
-    argv = ["ssh"] + list(SSH_OPTS)
-    if tty:
-        argv.append("-t")
-    argv.append(host)
-    argv.append(login_shell_command(command))
-    return argv
+    return SshHost(host).argv(command, tty=tty)
 
 
 def run(host: str, command: str, timeout: float = SSH_TIMEOUT) -> Tuple[int, str, str]:
-    try:
-        result = subprocess.run(
-            ssh_argv(host, command),
-            capture_output=True, text=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return 124, "", "timed out after {:.0f}s".format(timeout)
-    except OSError as exc:
-        return 127, "", str(exc)
-    return result.returncode, result.stdout, result.stderr
+    return SshHost(host).run(command, timeout=timeout)
 
 
 # -- shipping the collector -------------------------------------------------
@@ -161,17 +144,9 @@ def sync_code(host: str, timeout: float = SSH_TIMEOUT) -> Optional[str]:
     """Copy the collector to the remote. Returns an error string, or None."""
     payload = package_tar()
     command = "mkdir -p {d} && tar -xzf - -C {d}".format(d=REMOTE_CODE_DIR)
-    try:
-        result = subprocess.run(
-            ssh_argv(host, command),
-            input=payload, capture_output=True, timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return "timed out sending the collector"
-    except OSError as exc:
-        return str(exc)
-    if result.returncode != 0:
-        return (result.stderr or b"").decode("utf-8", "replace").strip() or "copy failed"
+    code, err = SshHost(host).run_input(command, payload, timeout=timeout)
+    if code != 0:
+        return err.strip().splitlines()[-1] if err.strip() else "copy failed"
     return None
 
 

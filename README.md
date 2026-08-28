@@ -168,6 +168,53 @@ exposed across SSH, so those rows say so rather than offering a button that woul
 the command against a job id on the wrong box. Remote agents started through
 agentview run under tmux and attach normally.
 
+## Containers
+
+Agents inside a container are invisible from the host's process table, so the hub
+looks inside them too — on this machine and on every SSH host — and nests each
+container under the machine running it:
+
+```
+Masons-MacBook-Pro                      9 agents
+  devcontainer: agentview-demo          1
+pronto_server                           1 agent
+  devcontainer: Opetopic                1
+```
+
+The collector already describes a container from the inside, reading the
+devcontainer's own name and workspace folder, so a card says
+`devcontainer: Opetopic` rather than a hex id.
+
+Only containers that **report at least one agent** get a card. A machine can easily
+run a dozen — databases, proxies, a pgadmin — and a card each would bury the thing
+this is for. Containers with no interpreter are skipped outright; the collector is
+copied into the rest under `/tmp`, which is writable even in images that run as a
+non-root user.
+
+Enumerating containers is comparatively expensive, so it happens rarely, while
+containers that actually hold an agent are re-collected often enough that their rows
+do not flicker against the registry's TTL. `--no-containers` turns the whole thing
+off.
+
+Attach follows the same "just an argv" rule, gaining one wrapper per layer:
+
+| where the agent is | attach |
+|---|---|
+| this machine | `tmux attach -t <session>` |
+| a container here | `docker exec -it <id> tmux attach -t <session>` |
+| a container on an SSH host | `ssh <host> -t docker exec -it <id> tmux attach …` |
+
+A container image without tmux still gets its agents *listed*, with an honest note
+that there is no terminal to reach them through. Background agents inside a container
+cannot be attached either: `claude attach` speaks to a unix socket in there, and
+running it outside would target a job id that does not exist on this side.
+
+A container that bind-mounts the host's `~/.claude` — common for devcontainers — does
+not double-report the host's agents. That needs no special handling: the collector
+checks each session's pid is a live Claude Code process, and a host pid is not live
+inside the container's PID namespace, so those records are dropped by the same
+liveness check that removes stale ones.
+
 ## Reading the list
 
 **Agents are grouped by working directory.** "What is running in this repo" is the

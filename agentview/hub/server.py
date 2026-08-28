@@ -37,6 +37,8 @@ from agentview import harnesses
 from agentview import runner
 from agentview.hub.ptys import PtyManager
 from agentview.hub.overrides import COLOURS, Overrides
+from agentview.hub import containers as containers_mod
+from agentview.hub import hosts as hosts_mod
 from agentview.hub import remotes as remotes_mod
 from agentview.hub.registry import Registry
 
@@ -688,6 +690,73 @@ def remote_collector_loop(state: "HubState", host: str, interval: float) -> None
         time.sleep(interval)
 
 
+def container_loop(state: "HubState", host, parent_of, interval: float, refresh: float) -> None:
+    """Run the collector inside each container on one machine.
+
+    Two cadences on purpose. A full sweep -- list containers, probe for python, copy
+    the collector in -- is comparatively expensive and the set of containers barely
+    changes, so it runs rarely. Containers that actually hold an agent are then
+    re-collected far more often, because a context the registry stops hearing from is
+    TTL-expired and the row would flicker.
+
+    Only containers reporting at least one agent are ingested. A machine can easily
+    run a dozen containers -- databases, proxies, a pgadmin -- and a card for each
+    would bury the agents this is meant to surface.
+    """
+    payload = remotes_mod.package_tar()
+    known = {}      # container id -> python path (or None when it has none)
+    synced = set()
+    active = {}     # container id -> python path, for those holding agents
+    last_full = 0.0
+
+    def collect(cid, python):
+        snapshot, error = containers_mod.collect_once(host, cid, python)
+        if error:
+            synced.discard(cid)  # most likely the copy is gone; send it again
+            return False
+        if not (snapshot.get("agents") or []):
+            return False
+        state.registry.ingest(
+            containers_mod.rewrite(snapshot, host, cid, parent_of())
+        )
+        return True
+
+    while True:
+        try:
+            now = time.time()
+            if now - last_full >= interval:
+                last_full = now
+                if containers_mod.available(host):
+                    found, _ = containers_mod.list_containers(host)
+                    live = {c["id"] for c in found}
+                    for cid in list(known):
+                        if cid not in live:
+                            known.pop(cid, None)
+                            synced.discard(cid)
+                            active.pop(cid, None)
+                    active = {}
+                    for entry in found:
+                        cid = entry["id"]
+                        if cid not in known:
+                            known[cid] = containers_mod.python_in(host, cid)
+                        python = known[cid]
+                        if not python:
+                            continue  # a service image with no interpreter
+                        if cid not in synced:
+                            if containers_mod.sync_collector(host, cid, payload):
+                                continue
+                            synced.add(cid)
+                        if collect(cid, python):
+                            active[cid] = python
+            else:
+                for cid, python in list(active.items()):
+                    if not collect(cid, python):
+                        active.pop(cid, None)
+        except Exception:  # noqa: BLE001 - one bad host must not kill the hub
+            pass
+        time.sleep(refresh)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m agentview.hub")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback)")
@@ -700,6 +769,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--remote-interval", type=float, default=6.0,
         help="how often to poll each ssh host",
+    )
+    parser.add_argument(
+        "--no-containers", action="store_true",
+        help="do not look inside running containers",
+    )
+    parser.add_argument(
+        "--container-interval", type=float, default=20.0,
+        help="how often to re-enumerate containers on each machine",
     )
     parser.add_argument("--no-local", action="store_true", help="do not collect from this machine")
     parser.add_argument("--no-auth", action="store_true", help="disable the token (loopback only)")
@@ -769,6 +846,24 @@ def main(argv=None) -> int:
             args=(Handler.state, host, args.remote_interval),
             daemon=True,
         ).start()
+
+    if not args.no_containers:
+        refresh = max(2.0, min(args.container_interval, registry.ttl / 2.0))
+        if not args.no_local:
+            threading.Thread(
+                target=container_loop,
+                args=(Handler.state, hosts_mod.LocalHost(), lambda: local_ctx.id,
+                      args.container_interval, refresh),
+                daemon=True,
+            ).start()
+        for host in hosts:
+            threading.Thread(
+                target=container_loop,
+                args=(Handler.state, hosts_mod.SshHost(host),
+                      (lambda h: lambda: Handler.state.remotes.get(h, {}).get("context_id"))(host),
+                      args.container_interval, refresh),
+                daemon=True,
+            ).start()
 
     try:
         httpd = ThreadingHTTPServer((args.host, args.port), Handler)
