@@ -86,3 +86,40 @@ class TmuxAttachTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentviewOwnClientsAreHiddenTest(unittest.TestCase):
+    """agentview parks `claude attach` clients in tmux sessions of its own.
+
+    Those panes must never be discovered as agents. The background session they show
+    is already in the list via the Claude Code adapter, and its real process lives
+    outside tmux entirely -- so pane discovery cannot dedupe it by ancestry, and every
+    background agent you opened would appear a second time.
+    """
+
+    BG_SESSION = tmux.AGENTVIEW_BG_PREFIX + "unittest"
+
+    @classmethod
+    def setUpClass(cls):
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", cls.BG_SESSION, "sh", "-c", "sleep 30"],
+            capture_output=True, timeout=20,
+        )
+        time.sleep(0.3)
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.run(
+            ["tmux", "kill-session", "-t", cls.BG_SESSION], capture_output=True
+        )
+
+    def test_the_session_really_exists(self):
+        """Otherwise the assertion below would pass for the wrong reason."""
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", self.BG_SESSION], capture_output=True
+        )
+        self.assertEqual(result.returncode, 0)
+
+    def test_pane_discovery_skips_it(self):
+        sessions = [pane.session for pane in tmux.list_panes()]
+        self.assertNotIn(self.BG_SESSION, sessions)

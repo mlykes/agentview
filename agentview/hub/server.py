@@ -22,6 +22,7 @@ import os
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -35,6 +36,10 @@ from agentview.collector.core import collect
 from agentview import harnesses
 from agentview import runner
 from agentview.hub.ptys import PtyManager
+from agentview.hub.overrides import COLOURS, Overrides
+from agentview.hub import containers as containers_mod
+from agentview.hub import hosts as hosts_mod
+from agentview.hub import remotes as remotes_mod
 from agentview.hub.registry import Registry
 
 WEB_ROOT = Path(__file__).parent / "web"
@@ -87,6 +92,38 @@ def available_harnesses():
     return unique
 
 
+#: How long to let a terminal paint before typing into it. tmux redraws on
+#: attach, but a freshly started `claude attach` client needs a moment before
+#: it has a prompt to receive the command.
+COLOUR_PUSH_DELAY = 1.5
+
+
+def colour_to_push(agent, overrides, agent_id: str) -> Optional[str]:
+    """The colour owed to a session's own UI, or None to leave it alone.
+
+    A colour set in the list cannot reach the agent by itself -- there is no API for
+    it, and `color` is not a `claude` subcommand -- so the only route is typing into
+    the terminal. Doing that when the swatch is clicked would type into a session
+    nobody is looking at; deferring it to the next attach means the user is watching
+    when it happens.
+
+    Refused while the agent is busy: the text would sit in the prompt and be
+    submitted as a message when the turn ended. It stays queued for the next attach.
+    Refused for other harnesses, which have no `/color`.
+    """
+    if agent is None or agent.get("harness") != "claude-code":
+        return None
+    if agent.get("status") == "busy":
+        return None
+    return overrides.take_pending_colour(agent_id)
+
+
+def colour_keystrokes(colour: str) -> bytes:
+    """Ctrl-U first: without it the command is appended to whatever draft is sitting
+    in the prompt and run as one line."""
+    return b"\x15/color " + colour.encode("ascii", "ignore") + b"\r"
+
+
 class HubState:
     def __init__(
         self,
@@ -96,8 +133,12 @@ class HubState:
         local_context_id: Optional[str] = None,
         allow_input: bool = True,
         can_launch: bool = True,
+        overrides: Optional[Overrides] = None,
     ) -> None:
         self.registry = registry
+        #: agentview's own label and colour for each agent. A read-only hub does
+        #: not write them.
+        self.overrides = overrides
         self.token = token  # None => auth disabled
         self.ptys = ptys or PtyManager()
         #: Only agents in this context can be attached to; see resolve_attach().
@@ -106,6 +147,13 @@ class HubState:
         #: Whether the UI may start new agents. Off when the hub is read-only --
         #: a monitoring deployment should not be able to spawn processes.
         self.can_launch = can_launch and allow_input
+        #: Editing a row mutates hub-side state, so a read-only hub refuses it for
+        #: the same reason it refuses launching.
+        self.can_edit = allow_input and overrides is not None
+        #: host -> {"harnesses": {command: path}, "context_id": ..., "error": ...}.
+        #: Filled in by the remote poll loop; read when listing launch targets and
+        #: when resolving a command to start there.
+        self.remotes: Dict[str, Dict[str, Any]] = {}
 
     def resolve_attach(self, agent_id: str):
         """(argv, error) for an agent, enforcing what this hub can actually reach.
@@ -120,6 +168,14 @@ class HubState:
         if not attach.get("available"):
             return None, attach.get("reason") or "attach unavailable for this agent"
         context_id = agent.get("context_id")
+        # An agent on a remote host is reachable when its argv already goes through
+        # ssh -- the collector's own argv was rewritten at ingest for exactly this.
+        if agent.get("ssh_host"):
+            key = "argv" if self.allow_input else "argv_readonly"
+            argv = attach.get(key) or attach.get("argv")
+            if not argv or not isinstance(argv, list):
+                return None, "no attach command reported"
+            return argv, None
         if self.local_context_id and context_id != self.local_context_id:
             # The argv is written for the collector's machine. Running it here would
             # attach to the wrong box, or to nothing. Remote attach needs the hub to
@@ -232,7 +288,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/v1/harnesses":
             return self._json(200, {"harnesses": available_harnesses(),
-                                    "can_launch": self.state.can_launch})
+                                    "targets": self._launch_targets(),
+                                    "can_launch": self.state.can_launch,
+                                    "can_edit": self.state.can_edit,
+                                    "colours": list(COLOURS)})
 
         if path == "/v1/view":
             return self._json(200, self.state.registry.view())
@@ -265,9 +324,33 @@ class Handler(BaseHTTPRequestHandler):
             if not self.state.can_launch:
                 return self._json(403, {"error": "launching is disabled on this hub"})
             requested = str(payload.get("harness") or "")
-            # The command is resolved from the server's own harness table. The browser
-            # names a harness; it never supplies a command, or this would be arbitrary
-            # execution behind a loopback port.
+            host = payload.get("host") or None
+            # The command is resolved from the server's own table -- the local one, or
+            # what was probed on that remote. The browser names a harness and a host;
+            # it never supplies a command, or this would be arbitrary execution behind
+            # a loopback port, on someone else's machine as well as this one.
+            if host:
+                if host not in self.state.remotes:
+                    return self._json(400, {"error": "unknown host"})
+                target = next(
+                    (t for t in self._launch_targets() if t["host"] == host), None
+                )
+                match = next(
+                    (h for h in (target or {}).get("harnesses", [])
+                     if h["harness"] == requested),
+                    None,
+                )
+                if match is None:
+                    return self._json(
+                        400, {"error": "harness not installed on " + host}
+                    )
+                name = str(payload.get("name") or "").strip() or match["harness"]
+                session = runner.unique_session_name(name)
+                error = remotes_mod.launch(host, match["command"], session)
+                if error:
+                    return self._json(500, {"error": error})
+                return self._json(200, {"ok": True, "session": session,
+                                        "harness": match["harness"], "host": host})
             match = next(
                 (h for h in available_harnesses() if h["harness"] == requested), None
             )
@@ -280,6 +363,55 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(500, {"error": str(exc)})
             return self._json(200, {"ok": True, "session": session,
                                     "harness": match["harness"]})
+
+        if parsed.path in ("/v1/rename", "/v1/color"):
+            if not self.state.can_edit:
+                return self._json(403, {"error": "editing is disabled on this hub"})
+            agent_id = str(payload.get("id") or "")
+            if not agent_id:
+                return self._json(400, {"error": "missing agent id"})
+            if self.state.registry.find_agent(agent_id) is None:
+                return self._json(404, {"error": "no such agent"})
+            if parsed.path == "/v1/rename":
+                label = self.state.overrides.set_name(agent_id, payload.get("name"))
+                return self._json(200, {"ok": True, "name": label})
+            # An unknown colour clears the override rather than being stored: the
+            # value becomes part of a CSS custom property name, and one we have no
+            # token for would render as no colour at all.
+            colour = self.state.overrides.set_colour(
+                agent_id, payload.get("color"), push=True
+            )
+            return self._json(200, {"ok": True, "color": colour})
+
+        if parsed.path == "/v1/stop":
+            if not self.state.can_edit:
+                return self._json(403, {"error": "stopping is disabled on this hub"})
+            agent_id = str(payload.get("id") or "")
+            agent = self.state.registry.find_agent(agent_id) if agent_id else None
+            if agent is None:
+                return self._json(404, {"error": "no such agent"})
+            if agent.get("context_id") != self.state.local_context_id:
+                # Same rule as attach: the argv is written for the collector's
+                # machine, so running it here would act on the wrong box.
+                return self._json(409, {"error": "agent is on another machine"})
+            argv, error = runner.stop_argv(agent)
+            if error:
+                return self._json(409, {"error": error})
+            try:
+                result = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return self._json(500, {"error": str(exc)})
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip().splitlines()
+                return self._json(
+                    500, {"error": detail[-1] if detail else "stop failed"}
+                )
+            # The terminal is pointing at something that no longer exists.
+            self.state.ptys.close(agent_id)
+            # The row lingers until the collector's next tick notices it is gone;
+            # dropping the override now would leave a renamed agent nameless if the
+            # stop turns out not to have taken.
+            return self._json(200, {"ok": True})
 
         if parsed.path == "/v1/snapshot":
             self.state.registry.ingest(payload)
@@ -330,6 +462,7 @@ class Handler(BaseHTTPRequestHandler):
         # An existing session was sized by whoever opened it first. Resize on every
         # connect so the terminal matches this window rather than a stale one.
         session.resize(cols, rows)
+        self._push_colour(agent_id, session)
 
         queue = []
         event = threading.Event()
@@ -373,6 +506,55 @@ class Handler(BaseHTTPRequestHandler):
             session.unsubscribe(sub_id)
             self._sse_end()
 
+    def _launch_targets(self):
+        """Where a new agent can be started, and what is installed there.
+
+        A remote's list is probed on the far side rather than assumed to match this
+        machine's -- they rarely do, and offering a harness that is not installed
+        would fail only once the user had already chosen it.
+        """
+        table = harnesses.load()
+        targets = [{
+            "host": None,
+            "label": "this machine",
+            "harnesses": available_harnesses(),
+        }]
+        for host, info in sorted(self.state.remotes.items()):
+            found = info.get("harnesses") or {}
+            seen, entries = set(), []
+            for command, path in sorted(found.items()):
+                identity = table.get(command)
+                if not identity or identity["harness"] in seen:
+                    continue
+                seen.add(identity["harness"])
+                entries.append({
+                    "harness": identity["harness"],
+                    "label": identity["label"],
+                    "command": path,
+                })
+            targets.append({
+                "host": host,
+                "label": host,
+                "harnesses": entries,
+                "error": info.get("error"),
+            })
+        return targets
+
+    def _push_colour(self, agent_id: str, session) -> None:
+        """Type `/color` into a session agentview was told to recolour."""
+        if self.state.overrides is None:
+            return
+        agent = self.state.registry.find_agent(agent_id)
+        colour = colour_to_push(agent, self.state.overrides, agent_id)
+        if not colour:
+            return
+        keys = colour_keystrokes(colour)
+        # After the terminal has painted -- tmux redraws on attach, and a fresh
+        # `claude attach` client needs a moment before it has a prompt to type into.
+        timer = threading.Timer(COLOUR_PUSH_DELAY, lambda: session.write(keys))
+        timer.daemon = True
+        timer.start()
+
     def _sse(self, data: bytes) -> None:
         """Terminal output is arbitrary bytes; base64 keeps it safe through SSE's
         line-oriented framing."""
@@ -401,7 +583,15 @@ class Handler(BaseHTTPRequestHandler):
         if not authorized:
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
-        blocks = [self._data_block("bootstrap", self.state.registry.view())]
+        blocks = [
+            self._data_block("bootstrap", self.state.registry.view()),
+            # Capabilities go in the first frame too. Learning them from the async
+            # /v1/harnesses fetch left the per-row controls missing until the next
+            # poll, which reads as "the feature isn't there" rather than "not yet".
+            self._data_block("caps", {"can_launch": self.state.can_launch,
+                                      "can_edit": self.state.can_edit,
+                                    "colours": list(COLOURS)}),
+        ]
 
         # For a ?open=<agent id> deep link, hand over the terminal's current screen
         # as well, so it paints immediately instead of sitting blank until the agent
@@ -462,11 +652,132 @@ def local_collector_loop(registry: Registry, interval: float, label, parent) -> 
         time.sleep(interval)
 
 
+def remote_collector_loop(state: "HubState", host: str, interval: float) -> None:
+    """Poll one SSH host by running the collector there.
+
+    The collector is copied over on the first tick and after any failure that looks
+    like it went missing, so a remote that is rebooted or cleaned up heals itself
+    without anyone logging in.
+    """
+    synced = False
+    while True:
+        try:
+            if not synced:
+                error = remotes_mod.sync_code(host)
+                if error:
+                    state.remotes.setdefault(host, {})["error"] = error
+                    time.sleep(max(interval, 10.0))
+                    continue
+                synced = True
+
+            snapshot, error = remotes_mod.collect_once(host)
+            info = state.remotes.setdefault(host, {})
+            if error:
+                info["error"] = error
+                # Most likely the copy is gone or half-written; send it again.
+                synced = False
+            else:
+                info["error"] = None
+                info["context_id"] = (snapshot.get("context") or {}).get("id")
+                state.registry.ingest(remotes_mod.rewrite_for_ssh(snapshot, host))
+                found, herr = remotes_mod.remote_harnesses(
+                    host, sorted(harnesses.load().keys())
+                )
+                if not herr:
+                    info["harnesses"] = found
+        except Exception as exc:  # noqa: BLE001 - one bad host must not kill the hub
+            state.remotes.setdefault(host, {})["error"] = str(exc)
+        time.sleep(interval)
+
+
+def container_loop(state: "HubState", host, parent_of, interval: float, refresh: float) -> None:
+    """Run the collector inside each container on one machine.
+
+    Two cadences on purpose. A full sweep -- list containers, probe for python, copy
+    the collector in -- is comparatively expensive and the set of containers barely
+    changes, so it runs rarely. Containers that actually hold an agent are then
+    re-collected far more often, because a context the registry stops hearing from is
+    TTL-expired and the row would flicker.
+
+    Only containers reporting at least one agent are ingested. A machine can easily
+    run a dozen containers -- databases, proxies, a pgadmin -- and a card for each
+    would bury the agents this is meant to surface.
+    """
+    payload = remotes_mod.package_tar()
+    known = {}      # container id -> python path (or None when it has none)
+    synced = set()
+    active = {}     # container id -> python path, for those holding agents
+    last_full = 0.0
+
+    def collect(cid, python):
+        snapshot, error = containers_mod.collect_once(host, cid, python)
+        if error:
+            synced.discard(cid)  # most likely the copy is gone; send it again
+            return False
+        if not (snapshot.get("agents") or []):
+            return False
+        state.registry.ingest(
+            containers_mod.rewrite(snapshot, host, cid, parent_of())
+        )
+        return True
+
+    while True:
+        try:
+            now = time.time()
+            if now - last_full >= interval:
+                last_full = now
+                if containers_mod.available(host):
+                    found, _ = containers_mod.list_containers(host)
+                    live = {c["id"] for c in found}
+                    for cid in list(known):
+                        if cid not in live:
+                            known.pop(cid, None)
+                            synced.discard(cid)
+                            active.pop(cid, None)
+                    active = {}
+                    for entry in found:
+                        cid = entry["id"]
+                        if cid not in known:
+                            known[cid] = containers_mod.python_in(host, cid)
+                        python = known[cid]
+                        if not python:
+                            continue  # a service image with no interpreter
+                        if cid not in synced:
+                            if containers_mod.sync_collector(host, cid, payload):
+                                continue
+                            synced.add(cid)
+                        if collect(cid, python):
+                            active[cid] = python
+            else:
+                for cid, python in list(active.items()):
+                    if not collect(cid, python):
+                        active.pop(cid, None)
+        except Exception:  # noqa: BLE001 - one bad host must not kill the hub
+            pass
+        time.sleep(refresh)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m agentview.hub")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback)")
     parser.add_argument("--port", type=int, default=7788)
     parser.add_argument("--interval", type=float, default=3.0, help="local collector tick")
+    parser.add_argument(
+        "--remote", action="append", default=[], metavar="HOST",
+        help="watch an ssh host (repeatable); remembered in ~/.agentview/remotes.json",
+    )
+    parser.add_argument(
+        "--remote-interval", type=float, default=6.0,
+        help="how often to poll each ssh host",
+    )
+    parser.add_argument(
+        "--no-containers", action="store_true",
+        help="do not look inside running containers",
+    )
+    parser.add_argument(
+        "--container-interval", type=float, default=20.0,
+        help="how often to re-enumerate containers on each machine",
+    )
     parser.add_argument("--no-local", action="store_true", help="do not collect from this machine")
     parser.add_argument("--no-auth", action="store_true", help="disable the token (loopback only)")
     parser.add_argument("--token", default=None, help="use this token instead of ~/.agentview/token")
@@ -501,7 +812,10 @@ def main(argv=None) -> int:
         return 2
 
     token = None if args.no_auth else (args.token or load_or_create_token())
-    registry = Registry(ttl=args.ttl, stuck_after=args.stuck_after)
+    overrides = Overrides()
+    registry = Registry(
+        ttl=args.ttl, stuck_after=args.stuck_after, override_fn=overrides.get
+    )
     local_ctx = context_mod.detect(parent_id=args.parent, label=args.label)
     Handler.state = HubState(
         registry,
@@ -509,6 +823,7 @@ def main(argv=None) -> int:
         local_context_id=None if args.no_local else local_ctx.id,
         allow_input=not args.read_only,
         can_launch=not args.no_launch,
+        overrides=overrides,
     )
     Handler.verbose = args.verbose
 
@@ -519,6 +834,36 @@ def main(argv=None) -> int:
             daemon=True,
         )
         thread.start()
+
+    hosts = remotes_mod.load_remotes(args.remote)
+    if args.remote:
+        # Naming a host on the command line is also how you add one for good.
+        remotes_mod.save_remotes(hosts)
+    for host in hosts:
+        Handler.state.remotes.setdefault(host, {})
+        threading.Thread(
+            target=remote_collector_loop,
+            args=(Handler.state, host, args.remote_interval),
+            daemon=True,
+        ).start()
+
+    if not args.no_containers:
+        refresh = max(2.0, min(args.container_interval, registry.ttl / 2.0))
+        if not args.no_local:
+            threading.Thread(
+                target=container_loop,
+                args=(Handler.state, hosts_mod.LocalHost(), lambda: local_ctx.id,
+                      args.container_interval, refresh),
+                daemon=True,
+            ).start()
+        for host in hosts:
+            threading.Thread(
+                target=container_loop,
+                args=(Handler.state, hosts_mod.SshHost(host),
+                      (lambda h: lambda: Handler.state.remotes.get(h, {}).get("context_id"))(host),
+                      args.container_interval, refresh),
+                daemon=True,
+            ).start()
 
     try:
         httpd = ThreadingHTTPServer((args.host, args.port), Handler)

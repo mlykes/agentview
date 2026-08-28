@@ -16,6 +16,22 @@
   --badge-bg: #eef2fb;
   --badge-ink: #3355b8;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Session colours, as the harness assigns them. Names come from the harness, so
+     the set is open-ended -- an unknown name falls back to the default ink rather
+     than to some arbitrary colour. Tuned for contrast on the light panel. */
+  --sc-red: #c9372c;
+  --sc-orange: #b45309;
+  --sc-yellow: #96700a;
+  --sc-green: #1a7f45;
+  --sc-teal: #0f766e;
+  --sc-cyan: #0e7490;
+  --sc-blue: #2c5fd0;
+  --sc-purple: #7038c8;
+  --sc-magenta: #a21caf;
+  --sc-pink: #c02a7a;
+  --sc-gray: #6b7280;
+  --sc-grey: #6b7280;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -34,6 +50,20 @@
     --accent: #6f9bff;
     --badge-bg: #1d2740;
     --badge-ink: #8fb0ff;
+
+    /* Lifted for legibility on the dark panel; same hues. */
+    --sc-red: #ff6b63;
+    --sc-orange: #f0a355;
+    --sc-yellow: #e3c04a;
+    --sc-green: #43d489;
+    --sc-teal: #2dd4bf;
+    --sc-cyan: #38bdf8;
+    --sc-blue: #6f9bff;
+    --sc-purple: #b48bff;
+    --sc-magenta: #e879f9;
+    --sc-pink: #f472b6;
+    --sc-gray: #9aa7b8;
+    --sc-grey: #9aa7b8;
   }
 }
 
@@ -86,11 +116,12 @@ body.with-terminal .no-attach,
 body.with-terminal .attach-hint,
 body.with-terminal .agent .right { display: none; }
 body.with-terminal .agent {
-  grid-template-columns: 16px 1fr;
+  grid-template-columns: 16px minmax(0, 1fr);
   padding: 7px 12px;
 }
 body.with-terminal .badge { display: none; }
-body.with-terminal .cwd { display: none; }
+body.with-terminal .cwd,
+body.with-terminal .branch-cell { display: none; }
 body.with-terminal .ctx-head { padding: 8px 12px; }
 
 .ctx { margin-bottom: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
@@ -107,12 +138,30 @@ body.with-terminal .ctx-head { padding: 8px 12px; }
 
 .agent {
   display: grid;
-  grid-template-columns: 16px minmax(150px, 1.4fr) 110px minmax(120px, 1.3fr) auto;
+  /* Every fixed width but one, on purpose. Each row is its own grid, so an `fr`
+     column resolves against that row's free space -- which depended on the
+     content of the auto-sized last column, and made the badge land at a
+     different x on every row. With only the name flexible, and the rest fixed,
+     each row divides the same remainder and the columns line up. */
+  grid-template-columns: 16px minmax(0, 1fr) 112px 156px 200px;
   gap: 12px; align-items: baseline;
   padding: 10px 15px;
   border-bottom: 1px solid var(--line-2);
 }
 .agent:last-child { border-bottom: 0; }
+
+/* Agents are grouped by working directory: the question "what is running in this
+   repo" is asked far more often than "what is running on this host". */
+.dir-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 7px 15px 6px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line-2);
+  font-family: var(--mono); font-size: 12px; color: var(--ink-2);
+}
+.dir-head .dir-count { margin-left: auto; font-family: inherit; color: var(--ink-3); }
+.dir-head + .agent { border-top: 0; }
+body.with-terminal .dir-head { padding: 6px 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); align-self: center; }
 .dot.busy { background: var(--busy); animation: pulse 1.8s ease-in-out infinite; }
 .dot.blocked { background: var(--blocked); }
@@ -120,13 +169,72 @@ body.with-terminal .ctx-head { padding: 8px 12px; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
 @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none } }
 
-.name { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name {
+  font-weight: 560; display: flex; align-items: center; gap: 6px; min-width: 0;
+  position: relative;  /* anchors the colour menu */
+}
+.name .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The session's own colour, carried on the row's left edge so it survives the
+   narrow column where the name is truncated first. */
+.agent { border-left: 3px solid transparent; }
+
+.rename {
+  border: 0; background: none; padding: 0 2px; cursor: pointer; font: inherit;
+  font-size: 11px; line-height: 1; color: var(--ink-3);
+  /* Faint but present: hover-only would be undiscoverable on a HUD you scan
+     rather than explore. */
+  opacity: .35; transition: opacity .12s ease; flex: 0 0 auto;
+}
+.agent:hover .rename, .rename:focus { opacity: 1; }
+.rename:hover { color: var(--accent); }
+.kill { color: var(--ink-3); }
+.kill:hover { color: var(--stuck); }
+/* Colour control. Sits beside the pencil; shows the colour currently in effect,
+   whether that came from the harness or from here. */
+.swatch {
+  width: 11px; height: 11px; border-radius: 50%; padding: 0; flex: 0 0 auto;
+  border: 1px solid rgba(0, 0, 0, .18); cursor: pointer; background: transparent;
+  opacity: .55; transition: opacity .12s ease;
+}
+.agent:hover .swatch, .swatch:focus { opacity: 1; }
+.swatch.none { border-style: dashed; border-color: var(--ink-3); }
+
+/* Machine heading in the launch menu; only shown when there is more than one. */
+.menu-head {
+  padding: 6px 10px 2px; font-size: 11px; font-weight: 620;
+  color: var(--ink-3); text-transform: lowercase;
+}
+/* Queued to be typed into the session the next time its terminal is open. */
+.swatch.pending { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--ink-3); }
+
+.swatch-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 20;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  max-width: 200px; padding: 7px 8px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .16);
+}
+.swatch-menu .swatch { width: 14px; height: 14px; opacity: 1; }
+.swatch-menu .swatch:hover { transform: scale(1.15); }
+.swatch-menu .clear {
+  border: 0; background: none; padding: 0 2px; cursor: pointer;
+  font: inherit; font-size: 11px; color: var(--ink-2);
+}
+.swatch-menu .clear:hover { color: var(--accent); }
+
+.name input {
+  font: inherit; font-weight: 560; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 4px;
+  padding: 1px 5px; min-width: 0; width: 100%;
+}
 .badge {
   font-size: 11px; padding: 2px 7px; border-radius: 5px;
   background: var(--badge-bg); color: var(--badge-ink);
   font-weight: 560; white-space: nowrap; justify-self: start;
 }
 .cwd { font-family: var(--mono); font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-cell { font-family: var(--mono); font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch { color: var(--ink-3); }
 .right { display: flex; gap: 12px; align-items: baseline; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; justify-self: end; }
 .status-word { text-transform: lowercase; }
@@ -149,7 +257,7 @@ body.with-terminal .footer { display: none; }
 
 @media (max-width: 720px) {
   .agent { grid-template-columns: 16px 1fr; }
-  .badge, .cwd, .right { grid-column: 2; justify-self: start; }
+  .badge, .cwd, .branch-cell, .right { grid-column: 2; justify-self: start; }
 }
 
 /* --- terminal overlay ------------------------------------------------- */
@@ -228,7 +336,9 @@ body.with-terminal .footer { display: none; }
 
 /* the row whose terminal is open */
 .agent.active { background: var(--badge-bg); }
-.agent.active .name { color: var(--accent); }
+/* No colour override here: a row that is open still shows its session colour, and
+   the active background already says which one is open. */
+.agent.active .name .label:not([style*="color"]) { color: var(--accent); }
 
 @media (max-width: 900px) {
   .workspace { flex-direction: column; height: auto; }

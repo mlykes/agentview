@@ -113,9 +113,20 @@ rather than whichever window opened it first.
 Only agents in the hub's own context can be attached to today. The argv is written for
 the collector's machine, so running a remote one locally would attach to the wrong box.
 
-You cannot attach to the PTY of a process started outside a multiplexer. Agents launched
-normally still appear (presence is the point of the HUD) with `available: false` and an
-honest `reason`.
+Attach is *just an argv*, so a harness that exposes its own way in gets one without any
+new machinery. Claude Code background agents have no controlling terminal, but
+`claude attach <job id>` opens a client onto the running session over its unix socket;
+the adapter emits that argv wrapped in `tmux new-session -A`, which is create-or-attach,
+so a reconnect joins the existing client instead of stacking another one.
+
+Those tmux sessions are named `agentview_bg_*` and are filtered out of pane discovery.
+They hold a *client*, not an agent -- the agent's own process lives outside tmux with no
+tty, so ancestry cannot dedupe it, and without the filter every background agent you
+opened would appear twice.
+
+What remains genuinely unattachable is a process started outside a multiplexer: there is
+no PTY to add. Those agents still appear (presence is the point of the HUD) with
+`available: false` and an honest `reason`.
 
 ### Snapshot
 

@@ -41,6 +41,9 @@ class PtySession:
         self.pid: Optional[int] = None
         self.fd: Optional[int] = None
         self.exit_status: Optional[int] = None
+        #: Set once the child has been waited on. `os.kill(pid, 0)` succeeds for a
+        #: zombie, so liveness cannot be decided from the pid alone.
+        self.exited = False
         self.started_at = time.time()
         self.last_viewer_at = time.time()
 
@@ -75,8 +78,15 @@ class PtySession:
 
     def _read_loop(self) -> None:
         while True:
+            # Read the descriptor through a local: close() sets self.fd to None from
+            # another thread, and `os.read(None, ...)` raises TypeError, which is not
+            # an OSError. That killed this thread outright, so _reap() never ran and
+            # the child was left a zombie forever.
+            fd = self.fd
+            if fd is None:
+                break
             try:
-                data = os.read(self.fd, READ_CHUNK)
+                data = os.read(fd, READ_CHUNK)
             except OSError as exc:
                 # EIO is the normal signal that the child closed the terminal.
                 if exc.errno not in (errno.EIO, errno.EBADF):
@@ -100,12 +110,22 @@ class PtySession:
                 pass
 
     def _reap(self) -> None:
+        """Wait for the child properly, or it stays a zombie and looks alive forever.
+
+        The read loop ends on EIO, which the terminal reports as soon as the child
+        closes it -- which can be *before* the child has finished exiting. A WNOHANG
+        wait at that moment returns 0, collects nothing, and leaves a zombie that
+        `os.kill(pid, 0)` happily reports as alive. The session is then never
+        restarted: reconnecting replays the dead session's scrollback instead of
+        opening a new terminal.
+        """
         if self.pid:
             try:
-                _, status = os.waitpid(self.pid, os.WNOHANG)
+                _, status = os.waitpid(self.pid, 0)
                 self.exit_status = status
             except OSError:
-                pass
+                pass  # already reaped, or never ours to reap
+            self.exited = True
         self._publish(b"\r\n[agentview] terminal session ended\r\n")
 
     # -- io ---------------------------------------------------------------
@@ -152,7 +172,7 @@ class PtySession:
 
     @property
     def alive(self) -> bool:
-        if self.pid is None:
+        if self.pid is None or self.exited:
             return False
         try:
             os.kill(self.pid, 0)
@@ -166,6 +186,7 @@ class PtySession:
                 os.kill(self.pid, signal.SIGHUP)
             except OSError:
                 pass
+            self.exited = True
         if self.fd is not None:
             try:
                 os.close(self.fd)

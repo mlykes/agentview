@@ -9,11 +9,17 @@ Liveness is injected rather than observed so the suite is deterministic -- wheth
 
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentview.collector.adapters.claude_code import ClaudeCodeAdapter, _resolve_status
+from agentview.collector.adapters.claude_code import (
+    NO_TERMINAL,
+    ClaudeCodeAdapter,
+    _resolve_status,
+    scan_colour,
+)
 from agentview.model import (
     STATUS_BLOCKED,
     STATUS_BUSY,
@@ -29,7 +35,12 @@ FAKE_TABLE = {
     1001: "claude bg-spare",
     1003: "claude",
     1004: "python3",
+    1005: "claude",
 }
+
+#: Whether `claude` and `tmux` exist is a property of the box the tests run on, so
+#: both are injected. Otherwise this suite would pass or fail depending on PATH.
+FAKE_CLAUDE = "/usr/local/bin/claude"
 
 
 class ClaudeCodeAdapterTest(unittest.TestCase):
@@ -42,7 +53,10 @@ class ClaudeCodeAdapterTest(unittest.TestCase):
 
         self.ctx = ContextRef(id="ctx-test", label="test", platform="linux", arch="x86_64")
         self.adapter = ClaudeCodeAdapter(
-            config_dir=FIXTURES, process_table_fn=lambda: dict(FAKE_TABLE)
+            config_dir=FIXTURES,
+            process_table_fn=lambda: dict(FAKE_TABLE),
+            which_fn=lambda name: FAKE_CLAUDE if name == "claude" else None,
+            tmux_available_fn=lambda: True,
         )
         self.records, self.warnings = self.adapter.discover(self.ctx)
         self.by_name = {r.name: r for r in self.records}
@@ -91,11 +105,186 @@ class ClaudeCodeAdapterTest(unittest.TestCase):
         for record in self.records:
             self.assertTrue(record.id.startswith("ctx-test:claude-code:"))
 
-    def test_attach_is_honestly_unavailable(self):
-        """M1 has no attach yet -- the UI must say why, not silently disable."""
-        attach = self.records[0].attach
+    def test_background_session_is_attachable_via_claude_attach(self):
+        """A bg session has no controlling terminal, but it is not unreachable.
+
+        `claude attach <job id>` opens a client onto the running session over its
+        unix socket. Reporting these as unattachable -- which we did until we checked
+        -- hid every background agent behind a dead button.
+        """
+        attach = self.by_name["refactor-api"].attach
+        self.assertTrue(attach.available)
+        self.assertIsNone(attach.reason)
+        self.assertEqual(attach.argv[-3:], [FAKE_CLAUDE, "attach", "job-live"])
+
+    def test_background_attach_is_parked_in_tmux_for_reconnects(self):
+        """`new-session -A` is create-or-attach: reopening joins the same client
+        rather than stacking a second one onto the session."""
+        attach = self.by_name["refactor-api"].attach
+        self.assertEqual(
+            attach.argv[:5],
+            ["tmux", "new-session", "-A", "-s", "agentview_bg_job-live"],
+        )
+
+    def test_background_readonly_variant_creates_then_attaches_readonly(self):
+        readonly = self.by_name["refactor-api"].attach.argv_readonly
+        self.assertEqual(readonly[:2], ["sh", "-c"])
+        self.assertIn("has-session -t agentview_bg_job-live", readonly[2])
+        self.assertIn("tmux attach -r -t agentview_bg_job-live", readonly[2])
+
+    def test_interactive_session_defers_to_the_tmux_adapter(self):
+        """An interactive session owns a real terminal. If that terminal is a tmux
+        pane, TmuxAdapter supplies the attach during the merge -- so this adapter must
+        leave it unavailable rather than routing it through `claude attach`, which is
+        for background sessions only."""
+        attach = self.by_name["hand-started"].attach
         self.assertFalse(attach.available)
-        self.assertTrue(attach.reason)
+        self.assertEqual(attach.reason, NO_TERMINAL)
+
+
+class BackgroundAttachTest(unittest.TestCase):
+    """The attach route is decided from what is on the box, so vary that directly."""
+
+    def _adapter(self, which, tmux_available):
+        return ClaudeCodeAdapter(
+            config_dir=FIXTURES,
+            process_table_fn=lambda: dict(FAKE_TABLE),
+            which_fn=which,
+            tmux_available_fn=lambda: tmux_available,
+        )
+
+    def _refactor_api(self, adapter):
+        ctx = ContextRef(id="ctx-test", label="test")
+        with mock.patch(
+            "agentview.collector.procs.pid_alive", side_effect=lambda pid: pid in FAKE_TABLE
+        ):
+            records, _ = adapter.discover(ctx)
+        return {r.name: r for r in records}["refactor-api"]
+
+    def test_without_tmux_the_client_runs_directly_in_the_pty(self):
+        """Still attachable -- it just restarts on each reconnect instead of
+        surviving one. Degrading to that beats disabling the button."""
+        adapter = self._adapter(lambda n: FAKE_CLAUDE if n == "claude" else None, False)
+        attach = self._refactor_api(adapter).attach
+        self.assertTrue(attach.available)
+        self.assertEqual(attach.argv, [FAKE_CLAUDE, "attach", "job-live"])
+        self.assertIsNone(attach.argv_readonly)
+
+    def test_missing_claude_binary_says_so(self):
+        adapter = self._adapter(lambda n: None, True)
+        attach = self._refactor_api(adapter).attach
+        self.assertFalse(attach.available)
+        self.assertIn("PATH", attach.reason)
+
+
+class SessionColourTest(unittest.TestCase):
+    """Where a session's colour comes from.
+
+    `/color` is not stored as a field anywhere -- not the session file, the job
+    state, or the daemon roster -- so an interactive session's colour looked
+    unreadable. It is recorded in the transcript as a local command, which is what
+    this reads. Missing it meant a session showed plain in the HUD while its own UI
+    showed the colour the user had set.
+    """
+
+    def setUp(self):
+        patcher = mock.patch(
+            "agentview.collector.procs.pid_alive", side_effect=lambda pid: pid in FAKE_TABLE
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        self.adapter = ClaudeCodeAdapter(
+            config_dir=FIXTURES,
+            process_table_fn=lambda: dict(FAKE_TABLE),
+            which_fn=lambda name: FAKE_CLAUDE if name == "claude" else None,
+            tmux_available_fn=lambda: True,
+        )
+        records, _ = self.adapter.discover(
+            ContextRef(id="ctx-test", label="test", platform="linux")
+        )
+        self.by_name = {r.name: r for r in records}
+
+    def test_interactive_colour_comes_from_the_transcript(self):
+        self.assertEqual(self.by_name["hand-started"].color, "teal")
+
+    def test_the_latest_colour_wins(self):
+        """The fixture sets red and later teal; the session is teal."""
+        self.assertNotEqual(self.by_name["hand-started"].color, "red")
+
+    def test_job_state_wins_when_it_records_one(self):
+        """A background session's state.json is authoritative -- the transcript is
+        only consulted when there is nothing better."""
+        self.assertEqual(self.by_name["refactor-api"].color, "blue")
+
+    def test_a_session_with_no_colour_stays_uncoloured(self):
+        self.assertIsNone(self.by_name["waiting-on-me"].git_branch)  # sanity: fixture read
+        adapter = ClaudeCodeAdapter(
+            config_dir=FIXTURES, process_table_fn=lambda: dict(FAKE_TABLE)
+        )
+        self.assertEqual(adapter._session_colour("no-such-session"), (None, None))
+
+    def test_rescanning_only_reads_what_was_appended(self):
+        """Transcripts are append-only and reach megabytes, so each tick reads the
+        new tail rather than the whole file."""
+        sid = "aaaaaaaa-0000-0000-0000-000000000005"
+        colour, _ = self.adapter._session_colour(sid)
+        offset = self.adapter._colour_scan[sid][0]
+        size = self.adapter._transcript(sid).stat().st_size
+        self.assertEqual(colour, "teal")
+        self.assertEqual(offset, size)  # nothing left to re-read
+
+
+class ScanColourTest(unittest.TestCase):
+    def _line(self, colour):
+        # The real records carry an escaped newline between the tags. Written as a
+        # literal one it would be invalid JSON, which is worth getting right here:
+        # the scanner has to cope with the real shape, not a convenient one.
+        return json.dumps({
+            "type": "system",
+            "subtype": "local_command",
+            "content": (
+                "<command-name>/color</command-name>\n"
+                "            <command-message>color</command-message>\n"
+                "            <command-args>" + colour + "</command-args>"
+            ),
+        }).encode()
+
+    def test_finds_the_last_colour(self):
+        chunk = b"\n".join([self._line("red"), self._line("green")])
+        self.assertEqual(scan_colour(chunk)[0], "green")
+
+    def test_ignores_unrelated_records(self):
+        chunk = b'{"type":"user","content":"talk about /color someday"}'
+        self.assertIsNone(scan_colour(chunk)[0])
+
+    def test_survives_a_truncated_line(self):
+        chunk = b'{"type":"system","content":"<command-name>/color</comm\n' + self._line("pink")
+        self.assertEqual(scan_colour(chunk)[0], "pink")
+
+    def test_empty_input_is_no_colour(self):
+        self.assertIsNone(scan_colour(b"")[0])
+
+    def test_the_time_of_the_change_is_reported(self):
+        """Without it a colour set here and one set in the session cannot be
+        ordered, and one source has to always overrule the other."""
+        line = json.dumps({
+            "type": "system",
+            "subtype": "local_command",
+            "timestamp": "2026-08-28T20:29:35.365Z",
+            "content": "<command-name>/color</command-name>"
+                       "<command-args>pink</command-args>",
+        }).encode()
+        colour, at = scan_colour(line)
+        self.assertEqual(colour, "pink")
+        self.assertAlmostEqual(at, 1787948975.365, places=2)
+
+    def test_a_record_with_no_timestamp_still_yields_the_colour(self):
+        colour, at = scan_colour(self._line("blue"))
+        self.assertEqual(colour, "blue")
+        self.assertIsNone(at)
+
+    def test_case_is_normalised(self):
+        self.assertEqual(scan_colour(self._line("TEAL"))[0], "teal")
 
 
 class ConfigDirTest(unittest.TestCase):

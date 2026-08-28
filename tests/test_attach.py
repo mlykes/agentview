@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import unittest
 
@@ -136,6 +137,62 @@ class PtySessionTest(unittest.TestCase):
         second = manager.get_or_start("k", ["sh", "-c", "sleep 5"], 80, 24)
         self.assertIs(first, second)
         manager.close_all()
+
+    def _wait_for_exit(self, session, seconds=6.0):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if session.exited:
+                return
+            time.sleep(0.05)
+        self.fail("child never reaped after {}s".format(seconds))
+
+    def test_a_reaped_child_never_looks_alive(self):
+        """A zombie answers `os.kill(pid, 0)` just like a running process, so
+        liveness cannot be decided from the pid alone.
+
+        The pid here belongs to a process that is genuinely still running, which is
+        exactly what a zombie's pid looks like to `os.kill`. Setting the flag that
+        _reap sets is what tells the two apart.
+        """
+        session = PtySession("dead", ["sh", "-c", "sleep 5"])
+        session.start()
+        os.kill(session.pid, 0)  # the check the old code relied on: still succeeds
+        session.exited = True    # what _reap records once the child is gone
+        self.assertFalse(session.alive)
+        session.close()
+
+    def test_manager_restarts_a_session_whose_child_exited(self):
+        """The user-visible bug: a child that had exited still looked alive, so
+        reconnecting replayed the dead terminal's scrollback instead of opening a
+        new one. Background sessions hit this constantly -- unlike `tmux attach`,
+        their client is meant to exit."""
+        manager = PtyManager()
+        first = manager.get_or_start("k", ["sh", "-c", "sleep 5"], 80, 24)
+        first.exited = True
+        second = manager.get_or_start("k", ["sh", "-c", "sleep 5"], 80, 24)
+        self.assertIsNot(first, second)
+        self.assertNotEqual(first.pid, second.pid)
+        self.assertTrue(second.alive)
+        manager.close_all()
+
+    def test_child_is_reaped_rather_than_left_defunct(self):
+        session = PtySession("zombie", ["sh", "-c", "exit 0"])
+        session.start()
+        self._wait_for_exit(session)
+        with self.assertRaises(OSError):  # nothing left to wait on
+            os.waitpid(session.pid, os.WNOHANG)
+
+    def test_reader_survives_the_descriptor_being_nulled(self):
+        """close() sets self.fd to None from another thread while the reader is in
+        its loop. `os.read(None, ...)` raises TypeError, which `except OSError` does
+        not catch -- so the reader thread died before reaching _reap() and the child
+        stayed defunct for the life of the hub. Calling the loop with fd already None
+        exercises that path directly; the timing window is too narrow to hit on
+        demand."""
+        session = PtySession("nofd", ["sh", "-c", "sleep 5"])
+        session.fd = None
+        session._read_loop()  # must return, not raise
+        self.assertTrue(True)
 
     def test_manager_reaps_dead_sessions(self):
         manager = PtyManager(idle_timeout=0.0)

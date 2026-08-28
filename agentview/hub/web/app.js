@@ -64,21 +64,43 @@
     var state = agent.stuck ? "stuck" : agent.status;
     row.appendChild(el("span", "dot " + state));
 
-    var name = el("div", "name", agent.name || "(unnamed)");
-    name.title = agent.name || "";
+    // The harness assigns each session a colour; carry it through rather than
+    // inventing one. The dot already means status, so the colour goes on the name
+    // and the row's left edge.
+    var colour = agent.color ? String(agent.color).toLowerCase().replace(/[^a-z]/g, "") : "";
+
+    var name = el("div", "name");
+    var label = el("span", "label", agent.name || "(unnamed)");
+    if (colour) {
+      // Unknown colour names fall back to inherit rather than to something invented.
+      label.style.color = "var(--sc-" + colour + ", inherit)";
+      row.style.borderLeftColor = "var(--sc-" + colour + ", transparent)";
+    }
+    name.appendChild(label);
+    var notes = [];
+    if (agent.harness_name) {
+      notes.push(agent.harness_label + " calls it \"" + agent.harness_name + "\"");
+    }
+    if (agent.harness_color) {
+      notes.push(agent.harness_label + " colours it " + agent.harness_color);
+    }
+    name.title = notes.length ? agent.name + "  (" + notes.join("; ") + ")" : (agent.name || "");
+    if (canEdit) {
+      name.appendChild(swatchButton(agent, name));
+      name.appendChild(renameButton(agent, name, label));
+      if (stoppable(agent)) name.appendChild(killButton(agent));
+    }
     row.appendChild(name);
 
     var badge = el("span", "badge", agent.harness_label || agent.harness);
     if (agent.harness_version) badge.title = agent.harness_label + " " + agent.harness_version;
     row.appendChild(badge);
 
-    var cwd = el("div", "cwd");
-    cwd.appendChild(document.createTextNode(homeRelative(agent.cwd)));
-    if (agent.git_branch) {
-      cwd.appendChild(el("span", "branch", "  ⎇ " + agent.git_branch));
-    }
-    cwd.title = agent.cwd || "";
-    row.appendChild(cwd);
+    // The directory is the group heading now, so repeating it on every row would
+    // just be noise. The branch is not in the heading, so it stays here.
+    var branch = el("div", "branch-cell", agent.git_branch ? "⎇ " + agent.git_branch : "");
+    branch.title = agent.cwd || "";
+    row.appendChild(branch);
 
     var right = el("div", "right");
     if (agent.stuck) {
@@ -105,6 +127,174 @@
     return row;
   }
 
+  function stoppable(agent) {
+    // The same two signals the server decides on -- a background job has an id to
+    // pass to `claude stop`, and a tmux-resident agent has a session to kill.
+    // Repeated here only to avoid rendering a control that would always fail; the
+    // server re-checks and stays the authority.
+    var extra = agent.extra || {};
+    return !!(extra.job_id || extra.tmux_session);
+  }
+
+  function killButton(agent) {
+    var btn = el("button", "rename kill", "\u2715");
+    btn.type = "button";
+    btn.title = "stop this agent";
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();  // the row itself opens the terminal
+      // Stopping ends a running agent and cannot be undone from here, so it asks
+      // first -- and names the agent, because these rows sit close together.
+      var what = (agent.extra || {}).job_id
+        ? "Stop \"" + agent.name + "\"?\n\nThe session ends and its transcript is kept."
+        : "Stop \"" + agent.name + "\"?\n\nThis kills the tmux session it runs in.";
+      if (!window.confirm(what)) return;
+      if (current && current.id === agent.id) closeTerminal();
+      post("/v1/stop", { id: agent.id });
+    });
+    return btn;
+  }
+
+  function swatchButton(agent, nameCell) {
+    var colour = agent.color ? String(agent.color).toLowerCase().replace(/[^a-z]/g, "") : "";
+    var btn = el("button", "swatch" + (colour ? "" : " none"));
+    btn.type = "button";
+    btn.title = agent.color_pending
+      // A colour set here reaches the session by being typed into its terminal, so
+      // it waits until there is one open. Say so rather than leaving it a mystery.
+      ? "colour: " + colour + " -- applies in the session when you open its terminal"
+      : colour
+        ? "colour: " + colour + " -- click to change"
+        : "set a colour for this agent";
+    if (agent.color_pending) btn.className += " pending";
+    if (colour) btn.style.background = "var(--sc-" + colour + ", transparent)";
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();  // the row itself opens the terminal
+      openColourMenu(agent, nameCell, btn);
+    });
+    return btn;
+  }
+
+  function openColourMenu(agent, nameCell, anchor) {
+    if (editing) return;
+    editing = agent.id;
+
+    var menu = el("div", "swatch-menu");
+    menu.addEventListener("click", function (ev) { ev.stopPropagation(); });
+
+    function close(commit, value) {
+      if (!menu.parentNode) return;
+      menu.parentNode.removeChild(menu);
+      document.removeEventListener("mousedown", onOutside, true);
+      document.removeEventListener("keydown", onKey, true);
+      editing = null;
+      if (commit) submitColour(agent.id, value);
+      else tick();
+    }
+    function onOutside(ev) { if (!menu.contains(ev.target)) close(false); }
+    function onKey(ev) { if (ev.key === "Escape") close(false); }
+
+    palette.forEach(function (name) {
+      var dot = el("button", "swatch");
+      dot.type = "button";
+      dot.title = name;
+      dot.style.background = "var(--sc-" + name + ", transparent)";
+      dot.addEventListener("click", function () { close(true, name); });
+      menu.appendChild(dot);
+    });
+
+    // Clearing falls back to whatever the harness records, which for many sessions
+    // is nothing -- so this reads as "no colour" rather than "default colour".
+    var clear = el("button", "clear", "none");
+    clear.type = "button";
+    clear.addEventListener("click", function () { close(true, ""); });
+    menu.appendChild(clear);
+
+    nameCell.appendChild(menu);
+    document.addEventListener("mousedown", onOutside, true);
+    document.addEventListener("keydown", onKey, true);
+  }
+
+  function submitColour(id, value) {
+    post("/v1/color", { id: id, color: value });
+  }
+
+  function post(path, body) {
+    var headers = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = "Bearer " + token;
+    return fetch(path, { method: "POST", headers: headers, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (res) { if (res && res.error) setConn(false, res.error); })
+      .catch(function () { setConn(false, "update failed"); })
+      .then(function () { tick(); });
+  }
+
+  function renameButton(agent, nameCell, label) {
+    var btn = el("button", "rename", "\u270e");
+    btn.type = "button";
+    btn.title = "rename in agentview (clear the field to restore the original name)";
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();  // the row itself opens the terminal
+      startRename(agent, nameCell, label);
+    });
+    return btn;
+  }
+
+  function startRename(agent, nameCell, label) {
+    if (editing) return;
+    editing = agent.id;
+
+    var input = document.createElement("input");
+    input.type = "text";
+    input.value = agent.name || "";
+    input.maxLength = 64;
+    input.addEventListener("click", function (ev) { ev.stopPropagation(); });
+
+    var done = false;
+    function finish(commit) {
+      if (done) return;
+      done = true;
+      editing = null;
+      if (commit) submitRename(agent.id, input.value);
+      else tick();  // rebuild from server state
+    }
+
+    input.addEventListener("keydown", function (ev) {
+      ev.stopPropagation();
+      if (ev.key === "Enter") finish(true);
+      else if (ev.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", function () { finish(true); });
+
+    nameCell.replaceChild(input, label);
+    input.focus();
+    input.select();
+  }
+
+  function submitRename(id, value) {
+    post("/v1/rename", { id: id, name: value });
+  }
+
+  function byDirectory(agents) {
+    var groups = {};
+    var order = [];
+    agents.forEach(function (agent) {
+      var key = agent.cwd || "";
+      if (!groups[key]) {
+        groups[key] = { cwd: key, label: key ? homeRelative(key) : "(no directory)", agents: [] };
+        order.push(key);
+      }
+      groups[key].agents.push(agent);
+    });
+    // Alphabetical by displayed path so the list does not reshuffle as agents come
+    // and go; agents with no directory sit at the end rather than sorting as "".
+    order.sort(function (a, b) {
+      if (!a) return 1;
+      if (!b) return -1;
+      return groups[a].label < groups[b].label ? -1 : groups[a].label > groups[b].label ? 1 : 0;
+    });
+    return order.map(function (key) { return groups[key]; });
+  }
+
   function contextCard(node, isChild) {
     var ctx = node.context;
     var card = el("div", "ctx" + (isChild ? " child" : ""));
@@ -125,7 +315,15 @@
     if (!node.agents.length) {
       card.appendChild(el("div", "empty", "no agents running here"));
     } else {
-      node.agents.forEach(function (agent) { card.appendChild(agentRow(agent)); });
+      byDirectory(node.agents).forEach(function (group) {
+        var head = el("div", "dir-head");
+        head.appendChild(el("span", "dir-path", group.label));
+        head.title = group.cwd || "";
+        head.appendChild(el("span", "dir-count",
+          group.agents.length + " agent" + (group.agents.length === 1 ? "" : "s")));
+        card.appendChild(head);
+        group.agents.forEach(function (agent) { card.appendChild(agentRow(agent)); });
+      });
     }
 
     if (node.warnings && node.warnings.length) {
@@ -166,6 +364,8 @@
 
   function render(view) {
     renderTotals(view.totals);
+    // Rebuilding now would blow away the input the user is typing into.
+    if (editing) return;
     root.textContent = "";
     if (!view.contexts.length) {
       root.appendChild(el("div", "empty", "No collectors reporting yet."));
@@ -210,33 +410,66 @@
   var launchBtn = document.getElementById("launch-btn");
   var launchMenu = document.getElementById("launch-menu");
   var pendingSession = null;
+  //: Whether this hub accepts row edits; a read-only hub does not.
+  var canEdit = false;
+  //: Colour names the server has tokens for. Taken from the server rather than
+  //: hardcoded here, so the palette cannot drift out of sync with the stylesheet.
+  var palette = [];
+  //: Agent id currently being edited. render() rebuilds the whole list, so an open
+  //: editor or colour menu would be destroyed by the next poll tick unless we hold off.
+  var editing = null;
 
   function loadHarnesses() {
     fetch("/v1/harnesses" + (token ? "?t=" + encodeURIComponent(token) : ""),
           { headers: token ? { Authorization: "Bearer " + token } : {} })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (!data || !data.can_launch) return;
+        if (!data) return;
+        if (data.colours) palette = data.colours;
+        if (!!data.can_edit !== canEdit) {
+          canEdit = !!data.can_edit;
+          tick();  // repaint now rather than leaving the controls missing for a poll
+        }
+        if (!data.can_launch) return;
         launchWrap.hidden = false;
         launchMenu.textContent = "";
-        if (!data.harnesses.length) {
-          launchMenu.appendChild(el("div", "none", "no agent CLIs found on PATH"));
-          return;
-        }
-        data.harnesses.forEach(function (h) {
-          var item = el("button", null, h.label);
-          item.addEventListener("click", function () { launch(h); });
-          launchMenu.appendChild(item);
+        // One section per machine. With no remotes configured there is exactly one,
+        // and its heading is dropped so the menu looks as it always did.
+        var targets = data.targets || [{ host: null, label: "this machine",
+                                         harnesses: data.harnesses || [] }];
+        var many = targets.length > 1;
+        var offered = 0;
+        targets.forEach(function (target) {
+          if (many) launchMenu.appendChild(el("div", "menu-head", target.label));
+          if (target.error) {
+            launchMenu.appendChild(el("div", "none", target.error));
+            return;
+          }
+          if (!target.harnesses.length) {
+            launchMenu.appendChild(el("div", "none", "no agent CLIs installed"));
+            return;
+          }
+          target.harnesses.forEach(function (h) {
+            var item = el("button", null, h.label);
+            item.addEventListener("click", function () { launch(h, target.host); });
+            launchMenu.appendChild(item);
+            offered += 1;
+          });
         });
+        if (!offered && !many) {
+          launchMenu.textContent = "";
+          launchMenu.appendChild(el("div", "none", "no agent CLIs found on PATH"));
+        }
       })
       .catch(function () { /* launching stays hidden */ });
   }
 
-  function launch(harness) {
+  function launch(harness, host) {
     launchMenu.hidden = true;
     launchBtn.disabled = true;
-    launchBtn.textContent = "starting " + harness.label + "…";
-    api("/v1/launch", { harness: harness.harness })
+    launchBtn.textContent = "starting " + harness.label
+      + (host ? " on " + host : "") + "…";
+    api("/v1/launch", { harness: harness.harness, host: host || null })
       .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) {
         if (!res.ok) throw new Error(res.body.error || "could not start it");
@@ -462,6 +695,20 @@
 
   // Render the server-injected snapshot immediately so the first frame has real
   // content. Falls through to polling either way.
+  try {
+    // Capabilities first: agentRow() reads canEdit and the palette, so learning
+    // them after the first render would leave the controls missing until the next
+    // poll -- indistinguishable from the feature not existing.
+    var caps = document.getElementById("caps");
+    if (caps && caps.textContent) {
+      var parsed = JSON.parse(caps.textContent);
+      canEdit = !!parsed.can_edit;
+      palette = parsed.colours || [];
+    }
+  } catch (e) {
+    /* the /v1/harnesses fetch below still settles it */
+  }
+
   try {
     var boot = document.getElementById("bootstrap");
     if (boot && boot.textContent) {

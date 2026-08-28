@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 #: A context is dropped if we have not heard from its collector in this long.
 #: Three snapshot intervals, so one missed tick does not make agents flicker.
@@ -31,11 +31,16 @@ class Registry:
         self,
         ttl: float = DEFAULT_TTL_SECONDS,
         stuck_after: float = DEFAULT_STUCK_SECONDS,
+        override_fn: Optional[Callable[[str], Dict[str, str]]] = None,
     ) -> None:
         self._lock = threading.Lock()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self.ttl = ttl
         self.stuck_after = stuck_after
+        #: Looks up agentview's own display settings for an agent. Applied in
+        #: _annotate so every read path -- the UI view, /v1/agents, the TUI --
+        #: agrees on what a row is called and what colour it is.
+        self._override_fn = override_fn
 
     def ingest(self, snapshot: Dict[str, Any]) -> None:
         """Accept a snapshot from one collector, replacing that context's view."""
@@ -144,6 +149,35 @@ class Registry:
             and idle_for is not None
             and idle_for > self.stuck_after
         )
+        if self._override_fn is not None:
+            override = self._override_fn(agent.get("id")) or {}
+            if override.get("name"):
+                # Keep what the harness calls it. The label is agentview's, and a
+                # row that quietly disagreed with `claude agents` would be worse
+                # than one that shows both.
+                agent["harness_name"] = agent.get("name")
+                agent["name"] = override["name"]
+            if override.get("color"):
+                # Most recent wins. A colour can be set in two places -- the swatch
+                # here, or `/color` inside the session -- and if one source simply
+                # always overruled the other, changing it in the losing place would
+                # appear to do nothing. Both are timestamped so they can be ordered.
+                #
+                # An untimed value counts as older than any timed one: overrides
+                # written before this existed carry no time, and a session's colour
+                # taken from `state.json` rather than the transcript has none either.
+                # On a tie -- neither timed -- the override wins, since it is the
+                # more explicit of the two.
+                theirs = agent.get("color")
+                set_here = override.get("color_at") or 0
+                set_there = (agent.get("extra") or {}).get("color_at") or 0
+                if not theirs or set_here >= set_there:
+                    if theirs:
+                        agent["harness_color"] = theirs
+                    agent["color"] = override["color"]
+            if override.get("color_pending"):
+                # The UI says so rather than leaving the delay unexplained.
+                agent["color_pending"] = True
         return agent
 
     def flat_agents(self) -> List[Dict[str, Any]]:
