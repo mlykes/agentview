@@ -6,7 +6,7 @@ import json
 import unittest
 
 from agentview.collector.adapters.base import Adapter
-from agentview.collector.core import collect, merge
+from agentview.collector.core import collect, drop_shadowed_tmux_records, merge
 from agentview.model import AgentRecord, AttachSpec, ContextRef
 
 
@@ -79,6 +79,42 @@ class CollectTest(unittest.TestCase):
         payload = json.loads(json.dumps(snapshot.to_dict()))
         self.assertEqual(payload["agents"][0]["name"], "survivor")
         self.assertEqual(payload["context"]["id"], "c")
+
+
+class ShadowedTmuxRecordTest(unittest.TestCase):
+    """One agent, two adapters, ids that cannot be joined.
+
+    A harness with its own store keys on a session or thread id; the tmux adapter keys
+    on the pane. Only a pid says they are the same agent.
+    """
+
+    def _pair(self, rich_pid):
+        pane_attach = AttachSpec(available=True, argv=["tmux", "attach", "-t", "work"])
+        return [
+            record(id="c:codex:thread-1", harness="codex", name="a real name",
+                   pid=rich_pid, source="codex",
+                   attach=AttachSpec.unavailable("cannot resume, it is already open")),
+            record(id="c:codex:tmux-work", harness="codex", name="work", pid=4242,
+                   source="tmux", attach=pane_attach, extra={"tmux_session": "work"}),
+        ]
+
+    def test_the_duplicate_pane_row_collapses_into_the_real_one(self):
+        kept = drop_shadowed_tmux_records(self._pair(rich_pid=4242))
+        self.assertEqual([r.id for r in kept], ["c:codex:thread-1"])
+        self.assertEqual(kept[0].name, "a real name")
+
+    def test_the_survivor_inherits_the_pane_it_is_running_in(self):
+        """The point of joining, not just a tidier list: attach now reattaches to the
+        terminal already running the session instead of starting a second client."""
+        kept = drop_shadowed_tmux_records(self._pair(rich_pid=4242))
+        self.assertTrue(kept[0].attach.available)
+        self.assertEqual(kept[0].attach.argv, ["tmux", "attach", "-t", "work"])
+        self.assertEqual(kept[0].extra["tmux_session"], "work")
+
+    def test_an_unrelated_pane_is_left_alone(self):
+        """Guard against over-merging: a pid outside the pane is a different agent."""
+        kept = drop_shadowed_tmux_records(self._pair(rich_pid=None))
+        self.assertEqual(len(kept), 2)
 
 
 if __name__ == "__main__":

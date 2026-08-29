@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import os
 import fcntl
+import glob
 import shlex
 import shutil
 import sqlite3
+import subprocess
 import time
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from agentview.collector import procs
 from agentview.collector import tmux as tmux_mod
 from agentview.collector.adapters.base import Adapter
 from agentview.model import AgentRecord, AttachSpec, ContextRef, STATUS_BUSY, STATUS_IDLE
@@ -26,6 +29,10 @@ from agentview.model import AgentRecord, AttachSpec, ContextRef, STATUS_BUSY, ST
 HARNESS = "codex"
 HARNESS_LABEL = "Codex"
 SESSION_PREFIX = "agentview_codex_"
+
+#: Codex names each thread's transcript after the thread, so an open rollout file
+#: identifies which thread a process is working on.
+ROLLOUT_MARKER = "rollout-"
 
 #: How recently a thread must have moved for "a client has it open" to mean "it is
 #: working". Codex offers no busy/idle signal of its own -- only an advisory writer
@@ -74,6 +81,108 @@ def thread_has_writer(home: Path, thread_id: str) -> bool:
     return False
 
 
+def resumed_thread_pids(commands: Dict[int, str]) -> Dict[str, int]:
+    """thread id -> pid, for clients started as ``codex resume <thread-id>``.
+
+    The only *exact* join available between a thread and a process. Codex's writer
+    lock files are empty, so nothing on disk records who holds a thread, but a resumed
+    client carries the id in its own argv.
+
+    This matters because a `codex` running in a tmux session is otherwise reported
+    twice -- once here from the thread store, once by the generic tmux adapter from
+    the pane -- and the two ids cannot be joined. Giving the record a pid is all
+    `core.drop_shadowed_tmux_records` needs to recognise them as one agent, and it
+    then hands over the pane's attach: reattaching to the terminal already running the
+    session, rather than starting a second client Codex would refuse anyway.
+
+    Every session agentview opens is a resume, so this covers the HUD's own sessions
+    and any resumed by hand. A `codex` started fresh carries no id in its argv and is
+    joined by `open_rollouts` instead.
+    """
+    found: Dict[str, int] = {}
+    for pid, command in (commands or {}).items():
+        parts = command.split()
+        if len(parts) < 3 or os.path.basename(parts[0]) != "codex":
+            continue
+        try:
+            index = parts.index("resume")
+        except ValueError:
+            continue
+        if index + 1 < len(parts) and not parts[index + 1].startswith("-"):
+            # `codex resume --last` names no thread. Skipping the flag matters beyond
+            # tidiness: a bogus entry here would count the pid as claimed and stop
+            # `open_rollouts` from joining it the other way.
+            found.setdefault(parts[index + 1], pid)
+    return found
+
+
+def codex_pids(commands: Dict[int, str]) -> List[int]:
+    """Pids whose program is `codex` itself.
+
+    Not `codex-code-mode-host`, which each client spawns as a helper: matching on the
+    exact basename keeps those out without naming them.
+    """
+    found = []
+    for pid, command in (commands or {}).items():
+        parts = command.split()
+        if parts and os.path.basename(parts[0]) == "codex":
+            found.append(pid)
+    return found
+
+
+def open_rollouts(pids: List[int]) -> Dict[int, List[str]]:
+    """pid -> every rollout transcript that pid holds open.
+
+    A list, not one path: a client that starts a second thread keeps the first one's
+    transcript open too, so a pid can hold several. Which of them it is *working on*
+    is decided by the caller, which has the recency the store records.
+
+    The exact answer for a `codex` started fresh, which carries no thread id in its
+    argv: the process holds its thread's rollout file open, and the file is named
+    after the thread. Nothing here is inferred from timing.
+
+    Linux answers this from /proc with no subprocess at all. Elsewhere -- macOS, the
+    BSDs -- there is no /proc, so this asks `lsof` about exactly these pids, which is
+    a targeted lookup rather than a scan of the machine (~80ms for a handful here).
+    Where neither is available the join is simply skipped: a duplicate row is a much
+    smaller sin than a wrong one.
+    """
+    if not pids:
+        return {}
+
+    found: Dict[int, List[str]] = {}
+    if os.path.isdir("/proc"):
+        for pid in pids:
+            for link in glob.glob("/proc/{}/fd/*".format(pid)):
+                try:
+                    target = os.readlink(link)
+                except OSError:
+                    continue
+                if ROLLOUT_MARKER in target:
+                    found.setdefault(pid, []).append(target)
+        return found
+
+    try:
+        out = subprocess.run(
+            ["lsof", "-p", ",".join(str(pid) for pid in pids), "-Fn"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    # -Fn emits `p<pid>` lines followed by the `n<name>` lines belonging to it.
+    current = None
+    for line in out.splitlines():
+        if line.startswith("p"):
+            try:
+                current = int(line[1:])
+            except ValueError:
+                current = None
+        elif line.startswith("n") and current is not None and ROLLOUT_MARKER in line:
+            found.setdefault(current, []).append(line[1:])
+    return found
+
+
 def resume_attach_argv(
     thread_id: str, codex_bin: str, use_tmux: bool
 ) -> Tuple[List[str], Optional[List[str]]]:
@@ -110,6 +219,8 @@ class CodexAdapter(Adapter):
         tmux_available_fn: Optional[Callable[[], bool]] = None,
         active_thread_fn: Optional[Callable[[str], bool]] = None,
         tmux_has_session_fn: Optional[Callable[[str], bool]] = None,
+        commands_fn: Optional[Callable[[], Dict[int, str]]] = None,
+        rollouts_fn: Optional[Callable[[List[int]], Dict[int, str]]] = None,
     ) -> None:
         self.codex_home = Path(codex_home) if codex_home else default_codex_home()
         self._which = which_fn or shutil.which
@@ -118,6 +229,8 @@ class CodexAdapter(Adapter):
             lambda thread_id: thread_has_writer(self.codex_home, thread_id)
         )
         self._tmux_has_session_fn = tmux_has_session_fn or tmux_mod.has_session
+        self._commands_fn = commands_fn or procs.command_table
+        self._rollouts_fn = rollouts_fn or open_rollouts
 
     def available(self) -> bool:
         return _latest_state_db(self.codex_home) is not None
@@ -171,6 +284,22 @@ class CodexAdapter(Adapter):
             return [], ["codex: cannot read {}: {}".format(db_path.name, exc)]
 
         now = time.time()
+        commands = self._commands_fn()
+        pids = resumed_thread_pids(commands)
+        # Whatever argv could not answer, ask the filesystem. Skipped entirely when no
+        # unclaimed `codex` is running, which is the usual case.
+        unclaimed = [pid for pid in codex_pids(commands) if pid not in set(pids.values())]
+        if unclaimed:
+            # `rows` is ordered newest-active first, so the first thread a pid has a
+            # transcript open for is the one it is working on now -- the earlier ones
+            # are threads it moved on from but has not closed.
+            ids = [str(row["id"]) for row in rows]
+            for pid, paths in self._rollouts_fn(unclaimed).items():
+                blob = "\n".join(paths)
+                for thread_id in ids:
+                    if thread_id in blob:
+                        pids.setdefault(thread_id, pid)
+                        break
         records = []
         for row in rows:
             thread_id = str(row["id"])
@@ -203,6 +332,7 @@ class CodexAdapter(Adapter):
                     started_at=(row["created_at_ms"] / 1000.0) if row["created_at_ms"] else None,
                     updated_at=updated_at,
                     tokens=row["tokens_used"] if isinstance(row["tokens_used"], int) else None,
+                    pid=pids.get(thread_id),
                     attach=self._attach_for(thread_id, held),
                     source=self.name,
                     extra={"session_id": thread_id, "resumable": True},
