@@ -31,7 +31,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 #: Unpacked inside the container. /tmp because it is writable in essentially every
 #: image, including the ones that run as a non-root user with a read-only home.
-CODE_DIR = "/tmp/.agentview-code"
+#: Fallback when no instance is named; a live hub always passes its own so two
+#: hubs never unpack over each other inside the same container.
+CODE_DIR = "/tmp/.agentview-code-default"
 
 #: Containers are enumerated far less often than agents are polled: the set changes
 #: rarely, and each probe costs an exec (or an ssh plus an exec).
@@ -76,11 +78,18 @@ def python_in(host, cid: str) -> Optional[str]:
     return path[0].strip() if path and path[0].strip() else None
 
 
-def sync_collector(host, cid: str, payload: bytes) -> Optional[str]:
+def code_dir(instance: Optional[str] = None) -> str:
+    if not instance:
+        return CODE_DIR
+    from agentview.hub.runtime import deployment_dir
+    return deployment_dir("container", instance)
+
+
+def sync_collector(host, cid: str, payload: bytes, instance: Optional[str] = None) -> Optional[str]:
     """Copy the collector into the container. Returns an error string, or None."""
     command = "docker exec -i {c} sh -c {inner}".format(
         c=shlex.quote(cid),
-        inner=shlex.quote("mkdir -p {d} && tar -xzf - -C {d}".format(d=CODE_DIR)),
+        inner=shlex.quote("mkdir -p {d} && tar -xzf - -C {d}".format(d=code_dir(instance))),
     )
     code, err = host.run_input(command, payload)
     if code != 0:
@@ -88,11 +97,11 @@ def sync_collector(host, cid: str, payload: bytes) -> Optional[str]:
     return None
 
 
-def collect_once(host, cid: str, python: str = "python3"):
+def collect_once(host, cid: str, python: str = "python3", instance: Optional[str] = None):
     command = "docker exec {c} sh -c {inner}".format(
         c=shlex.quote(cid),
         inner=shlex.quote("cd {d} && {p} -m agentview.collector --once".format(
-            d=CODE_DIR, p=python
+            d=code_dir(instance), p=python
         )),
     )
     code, out, err = host.run(command)

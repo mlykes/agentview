@@ -171,6 +171,58 @@ exposed across SSH, so those rows say so rather than offering a button that woul
 the command against a job id on the wrong box. Remote agents started through
 agentview run under tmux and attach normally.
 
+## Stable and preview hubs
+
+A clean main checkout and a feature checkout can run the full topology together:
+
+```bash
+cd ~/Developer/agentview
+git pull --ff-only
+./bin/agentview hub --profile stable       # port 7788
+
+cd ~/Developer/agentview/.claude/worktrees/my-feature
+./bin/agentview hub --profile preview      # port 7789
+```
+
+When starting a hub from inside Codex or another agent, detach it so the harness does
+not treat the long-running server as one of the session's background shell commands:
+
+```bash
+./bin/agentview hub --profile preview --daemon
+```
+
+`--daemon` uses POSIX process detachment implemented by AgentView itself—not macOS
+`launchctl` or Linux `systemd`—so the same command works on macOS, Linux, and inside
+an already-running Linux container. PID and log files live under
+`~/.agentview/run/<instance-id>.{pid,log}`. When AgentView is the container's primary
+process, leave it in the foreground and let the container runtime supervise it.
+
+`stable` is the backward-compatible default. `--port` overrides either profile's
+port, and the profile, checkout, branch, short commit, dirty marker and effective
+port appear in the authenticated page and startup banner. Always use the launcher
+inside the checkout being previewed: a global symlink targeting the main checkout
+will run main's code regardless of the selected port.
+
+Both hubs intentionally read and control the same agents and share
+`~/.agentview/names.json`, `~/.agentview/remotes.json`, and the auth token. Thus an
+attach, stop, rename, colour change, or launch in either writable UI affects shared
+state. Full-topology previews also approximately double polling traffic.
+
+`remotes.json` accepts SSH hosts and local Docker/Podman containers, for example:
+
+```json
+{
+  "ssh": ["devbox", {"host": "buildbox"}],
+  "containers": ["api-dev", {"name": "worker-dev", "engine": "podman"}]
+}
+```
+
+Each hub deploys its collector into an isolated cache:
+`~/.agentview/code/<instance-id>` over SSH and
+`/tmp/.agentview-code-<instance-id>` in a container. Old `~/.agentview/code` contents
+and `/tmp/.agentview-code-*` instances are not deleted automatically; stale or legacy
+caches are safe to remove after their hubs have stopped.
+
 ## Containers
 
 Agents inside a container are invisible from the host's process table, so the hub

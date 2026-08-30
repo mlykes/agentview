@@ -99,3 +99,18 @@ def has_session(name: str) -> bool:
         ).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def path_for_session(name: str) -> Optional[str]:
+    """Live cwd of a session's active pane, including agentview's own panes."""
+    if not available():
+        return None
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", name, "#{pane_current_path}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    path = result.stdout.strip() if result.returncode == 0 else ""
+    return path or None

@@ -12,9 +12,10 @@ from agentview.collector.adapters.codex import (
     CodexAdapter,
     _latest_state_db,
     codex_pids,
+    collapse_forked_continuations,
     resumed_thread_pids,
 )
-from agentview.model import ContextRef, STATUS_IDLE
+from agentview.model import AgentRecord, ContextRef, STATUS_IDLE
 
 
 SCHEMA = """
@@ -150,6 +151,19 @@ class ProcessJoinTest(unittest.TestCase):
         self.assertEqual(codex_pids({7: "/opt/codex/bin/codex-code-mode-host"}), [])
         self.assertEqual(codex_pids({8: "/home/me/.local/bin/codex"}), [8])
 
+    def test_the_shared_app_server_is_not_taken_for_a_session(self):
+        """One `codex app-server` backs every thread and holds all their transcripts
+        open, so a join based on open files sees it as a client for whichever thread
+        it happens to match -- naming a shared process as one arbitrary session."""
+        self.assertEqual(
+            codex_pids({7: "/Users/me/.codex/packages/standalone/current/codex app-server --listen unix://"}),
+            [],
+        )
+
+    def test_a_real_client_is_still_kept(self):
+        self.assertEqual(codex_pids({8: "/home/me/.local/bin/codex"}), [8])
+        self.assertEqual(codex_pids({9: "codex resume 01a04642"}), [9])
+
     def test_resume_with_a_flag_joins_nothing_rather_than_guessing(self):
         self.assertEqual(resumed_thread_pids({42: "codex resume --last"}), {})
 
@@ -217,6 +231,52 @@ class ProcessJoinTest(unittest.TestCase):
             commands_fn=lambda: commands,
             rollouts_fn=rollouts_fn or (lambda pids: rollouts or {}),
         )
+
+
+class ForkedContinuationTest(unittest.TestCase):
+    """Codex forks a thread when settings change -- a new id, the same conversation.
+    Both threads stay in the store, so the same session is listed twice."""
+
+    def _rec(self, ident, name, pid=None, forked_from=None):
+        return AgentRecord(
+            id="ctx:codex:" + ident, harness="codex", context_id="ctx", name=name,
+            pid=pid, extra={"session_id": ident, "forked_from_id": forked_from},
+        )
+
+    def test_the_superseded_thread_is_hidden(self):
+        kept = collapse_forked_continuations([
+            self._rec("old", "same name"),
+            self._rec("new", "same name", pid=42, forked_from="old"),
+        ])
+        self.assertEqual([r.extra["session_id"] for r in kept], ["new"])
+
+    def test_a_fork_with_its_own_process_stays_visible(self):
+        """Two live forks are two real terminals, not one session listed twice."""
+        kept = collapse_forked_continuations([
+            self._rec("old", "same name", pid=7),
+            self._rec("new", "same name", pid=42, forked_from="old"),
+        ])
+        self.assertEqual(len(kept), 2)
+
+    def test_a_renamed_fork_keeps_both(self):
+        """The user told them apart deliberately."""
+        kept = collapse_forked_continuations([
+            self._rec("old", "before"),
+            self._rec("new", "after", pid=42, forked_from="old"),
+        ])
+        self.assertEqual(len(kept), 2)
+
+    def test_unrelated_threads_are_untouched(self):
+        kept = collapse_forked_continuations([
+            self._rec("a", "one"), self._rec("b", "two"),
+        ])
+        self.assertEqual(len(kept), 2)
+
+    def test_a_fork_whose_parent_is_gone_is_kept(self):
+        kept = collapse_forked_continuations([
+            self._rec("new", "name", pid=42, forked_from="archived-parent"),
+        ])
+        self.assertEqual(len(kept), 1)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,33 @@ import subprocess
 from typing import Dict, List, Optional
 
 
+def cwd_for_pid(pid: int) -> Optional[str]:
+    """Working directory of a live process, on Linux and macOS.
+
+    A harness registry records where a session *started*. Agents move -- `/cd`, or a
+    shell that changed directory before launching -- and the row then names a
+    directory the agent is no longer in, which is worse than naming none, because
+    grouping by directory files it under the wrong repo.
+    """
+    if pid <= 0:
+        return None
+    try:
+        return os.readlink("/proc/{}/cwd".format(pid))
+    except OSError:
+        pass  # no /proc: macOS and the BSDs answer through lsof instead
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n/"):
+            return line[1:]
+    return None
+
+
 def process_table() -> Dict[int, str]:
     """pid -> command/process-title, for every visible process.
 

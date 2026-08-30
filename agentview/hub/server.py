@@ -41,6 +41,7 @@ from agentview.hub import containers as containers_mod
 from agentview.hub import hosts as hosts_mod
 from agentview.hub import remotes as remotes_mod
 from agentview.hub.registry import Registry
+from agentview.hub.runtime import PROFILE_PORTS, git_identity, instance_id
 
 WEB_ROOT = Path(__file__).parent / "web"
 TOKEN_PATH = Path.home() / ".agentview" / "token"
@@ -134,8 +135,14 @@ class HubState:
         allow_input: bool = True,
         can_launch: bool = True,
         overrides: Optional[Overrides] = None,
+        hub_info: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.registry = registry
+        #: Which checkout, branch and commit this hub is serving. Surfaced in the UI
+        #: because "am I looking at stale code?" is otherwise invisible -- a hub left
+        #: running from an old checkout reports missing agents, which is
+        #: indistinguishable from nothing running.
+        self.hub_info = dict(hub_info or {})
         #: agentview's own label and colour for each agent. A read-only hub does
         #: not write them.
         self.overrides = overrides
@@ -294,7 +301,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "colours": list(COLOURS)})
 
         if path == "/v1/view":
-            return self._json(200, self.state.registry.view())
+            return self._json(200, dict(self.state.registry.view(),
+                                        hub=self.state.hub_info))
         if path == "/v1/agents":
             return self._json(
                 200,
@@ -584,7 +592,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
         blocks = [
-            self._data_block("bootstrap", self.state.registry.view()),
+            self._data_block("bootstrap", dict(self.state.registry.view(),
+                                               hub=self.state.hub_info)),
             # Capabilities go in the first frame too. Learning them from the async
             # /v1/harnesses fetch left the per-row controls missing until the next
             # poll, which reads as "the feature isn't there" rather than "not yet".
@@ -652,7 +661,8 @@ def local_collector_loop(registry: Registry, interval: float, label, parent) -> 
         time.sleep(interval)
 
 
-def remote_collector_loop(state: "HubState", host: str, interval: float) -> None:
+def remote_collector_loop(state: "HubState", host: str, interval: float,
+                          instance: Optional[str] = None) -> None:
     """Poll one SSH host by running the collector there.
 
     The collector is copied over on the first tick and after any failure that looks
@@ -663,14 +673,14 @@ def remote_collector_loop(state: "HubState", host: str, interval: float) -> None
     while True:
         try:
             if not synced:
-                error = remotes_mod.sync_code(host)
+                error = remotes_mod.sync_code(host, instance=instance)
                 if error:
                     state.remotes.setdefault(host, {})["error"] = error
                     time.sleep(max(interval, 10.0))
                     continue
                 synced = True
 
-            snapshot, error = remotes_mod.collect_once(host)
+            snapshot, error = remotes_mod.collect_once(host, instance=instance)
             info = state.remotes.setdefault(host, {})
             if error:
                 info["error"] = error
@@ -690,7 +700,8 @@ def remote_collector_loop(state: "HubState", host: str, interval: float) -> None
         time.sleep(interval)
 
 
-def container_loop(state: "HubState", host, parent_of, interval: float, refresh: float) -> None:
+def container_loop(state: "HubState", host, parent_of, interval: float, refresh: float,
+                   instance: Optional[str] = None) -> None:
     """Run the collector inside each container on one machine.
 
     Two cadences on purpose. A full sweep -- list containers, probe for python, copy
@@ -710,7 +721,7 @@ def container_loop(state: "HubState", host, parent_of, interval: float, refresh:
     last_full = 0.0
 
     def collect(cid, python):
-        snapshot, error = containers_mod.collect_once(host, cid, python)
+        snapshot, error = containers_mod.collect_once(host, cid, python, instance=instance)
         if error:
             synced.discard(cid)  # most likely the copy is gone; send it again
             return False
@@ -743,7 +754,8 @@ def container_loop(state: "HubState", host, parent_of, interval: float, refresh:
                         if not python:
                             continue  # a service image with no interpreter
                         if cid not in synced:
-                            if containers_mod.sync_collector(host, cid, payload):
+                            if containers_mod.sync_collector(host, cid, payload,
+                                                             instance=instance):
                                 continue
                             synced.add(cid)
                         if collect(cid, python):
@@ -760,7 +772,10 @@ def container_loop(state: "HubState", host, parent_of, interval: float, refresh:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m agentview.hub")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback)")
-    parser.add_argument("--port", type=int, default=7788)
+    parser.add_argument(
+        "--port", type=int, default=None,
+        help="bind port (defaults to the profile's: stable 7788, preview 7789)",
+    )
     parser.add_argument("--interval", type=float, default=3.0, help="local collector tick")
     parser.add_argument(
         "--remote", action="append", default=[], metavar="HOST",
@@ -769,6 +784,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--remote-interval", type=float, default=6.0,
         help="how often to poll each ssh host",
+    )
+    parser.add_argument(
+        "--profile", choices=sorted(PROFILE_PORTS), default="stable",
+        help="hub profile (stable: 7788, preview: 7789)",
+    )
+    parser.add_argument(
+        "--daemon", action="store_true",
+        help="detach and keep running in the background",
     )
     parser.add_argument(
         "--no-containers", action="store_true",
@@ -800,8 +823,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_paths(instance: str):
+    root = Path(os.environ.get("AGENTVIEW_HOME") or (Path.home() / ".agentview")) / "run"
+    return root / (instance + ".pid"), root / (instance + ".log")
+
+
+def daemonize(instance: str) -> bool:
+    """Detach portably on POSIX. Returns True only in the serving grandchild.
+
+    A HUD you have to remember to start is a HUD that is not running when you want
+    it. The double fork is the standard one: the second parent exits so the server
+    can never reacquire a controlling terminal.
+    """
+    if os.name != "posix" or not hasattr(os, "fork"):
+        raise RuntimeError("--daemon requires a POSIX host (macOS or Linux)")
+    pid_path, log_path = run_paths(instance)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.fork():
+        print("agentview hub starting in background")
+        print("  pid file: {}".format(pid_path))
+        print("  log:      {}".format(log_path))
+        return False
+    os.setsid()
+    if os.fork():
+        os._exit(0)
+    os.chdir("/")
+    os.umask(0o027)
+    null_fd = os.open(os.devnull, os.O_RDONLY)
+    log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.dup2(null_fd, 0)
+    os.dup2(log_fd, 1)
+    os.dup2(log_fd, 2)
+    os.close(null_fd)
+    os.close(log_fd)
+    return True
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.port is None:
+        args.port = PROFILE_PORTS[args.profile]
 
     if args.no_auth and args.host not in ("127.0.0.1", "localhost", "::1"):
         print(
@@ -810,6 +871,17 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    identity = git_identity()
+    hub_info = dict(identity, profile=args.profile, port=args.port)
+    hub_info["instance_id"] = instance_id(args.profile, args.port)
+    if args.daemon:
+        try:
+            if not daemonize(hub_info["instance_id"]):
+                return 0
+        except (OSError, RuntimeError) as exc:
+            print("cannot start hub in background: {}".format(exc), file=sys.stderr)
+            return 1
 
     token = None if args.no_auth else (args.token or load_or_create_token())
     overrides = Overrides()
@@ -824,6 +896,7 @@ def main(argv=None) -> int:
         allow_input=not args.read_only,
         can_launch=not args.no_launch,
         overrides=overrides,
+        hub_info=hub_info,
     )
     Handler.verbose = args.verbose
 
@@ -843,7 +916,7 @@ def main(argv=None) -> int:
         Handler.state.remotes.setdefault(host, {})
         threading.Thread(
             target=remote_collector_loop,
-            args=(Handler.state, host, args.remote_interval),
+            args=(Handler.state, host, args.remote_interval, hub_info["instance_id"]),
             daemon=True,
         ).start()
 
@@ -853,7 +926,7 @@ def main(argv=None) -> int:
             threading.Thread(
                 target=container_loop,
                 args=(Handler.state, hosts_mod.LocalHost(), lambda: local_ctx.id,
-                      args.container_interval, refresh),
+                      args.container_interval, refresh, hub_info["instance_id"]),
                 daemon=True,
             ).start()
         for host in hosts:
@@ -861,7 +934,7 @@ def main(argv=None) -> int:
                 target=container_loop,
                 args=(Handler.state, hosts_mod.SshHost(host),
                       (lambda h: lambda: Handler.state.remotes.get(h, {}).get("context_id"))(host),
-                      args.container_interval, refresh),
+                      args.container_interval, refresh, hub_info["instance_id"]),
                 daemon=True,
             ).start()
 
@@ -871,13 +944,21 @@ def main(argv=None) -> int:
         print("cannot bind {}:{}: {}".format(args.host, args.port, exc), file=sys.stderr)
         return 1
 
+    if args.daemon:
+        pid_path, _ = run_paths(hub_info["instance_id"])
+        pid_path.write_text(str(os.getpid()) + "\n")
+
     url = "http://{}:{}/".format(
         "127.0.0.1" if args.host in ("0.0.0.0", "127.0.0.1") else args.host, args.port
     )
     if token:
         url += "?t=" + token
 
-    print("agentview hub listening on {}:{}".format(args.host, args.port))
+    print("agentview {} hub listening on {}:{}".format(args.profile, args.host, args.port))
+    print("  checkout: {}".format(identity["checkout"]))
+    print("  git:      {} @ {} ({})".format(
+        identity["branch"], identity["commit"], "dirty" if identity["dirty"] else "clean"))
+    print("  instance: {}".format(hub_info["instance_id"]))
     print("")
     print("  open:  {}".format(url))
     print("")

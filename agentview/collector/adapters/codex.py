@@ -13,13 +13,14 @@ from __future__ import annotations
 import os
 import fcntl
 import glob
+import json
 import shlex
 import shutil
 import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from agentview.collector import procs
 from agentview.collector import tmux as tmux_mod
@@ -81,6 +82,55 @@ def thread_has_writer(home: Path, thread_id: str) -> bool:
     return False
 
 
+def fork_parent(home: Path, thread_id: str) -> Optional[str]:
+    """The thread this one was forked from, if any.
+
+    Codex does not always continue a session in the same thread. A settings change
+    such as `/cd` forks it: a new thread id, the same conversation, the same process.
+    The old thread stays in the store, so both appear in `codex resume` and both would
+    appear here -- the same session listed twice under the same name.
+
+    Recorded in the first line of the thread's own transcript, so this is read from
+    what Codex wrote, not inferred.
+    """
+    try:
+        paths = list((home / "sessions").glob("*/*/*/*{}*.jsonl".format(thread_id)))
+    except OSError:
+        return None
+    for path in paths:
+        try:
+            with path.open("r", errors="replace") as fh:
+                first = json.loads(fh.readline())
+        except (OSError, ValueError):
+            continue
+        payload = first.get("payload") if isinstance(first, dict) else None
+        parent = payload.get("forked_from_id") if isinstance(payload, dict) else None
+        if isinstance(parent, str) and parent:
+            return parent
+    return None
+
+
+def collapse_forked_continuations(records: List[AgentRecord]) -> List[AgentRecord]:
+    """Drop a thread that a later fork has continued, so one session is one row.
+
+    Kept only when the fork is a genuinely separate live session: if the parent has
+    its own process, distinct from the child's, then two terminals really are open on
+    the two threads and both belong on screen. A rename also keeps both, on the
+    grounds that the user has told them apart deliberately.
+    """
+    by_id = {r.extra.get("session_id"): r for r in records}
+    superseded = set()
+    for child in records:
+        parent = by_id.get(child.extra.get("forked_from_id"))
+        if parent is None or child.name != parent.name:
+            continue
+        # A parent running in its own process is a real second session, not history.
+        if parent.pid and parent.pid != child.pid:
+            continue
+        superseded.add(parent.id)
+    return [r for r in records if r.id not in superseded]
+
+
 def resumed_thread_pids(commands: Dict[int, str]) -> Dict[str, int]:
     """thread id -> pid, for clients started as ``codex resume <thread-id>``.
 
@@ -116,17 +166,27 @@ def resumed_thread_pids(commands: Dict[int, str]) -> Dict[str, int]:
     return found
 
 
-def codex_pids(commands: Dict[int, str]) -> List[int]:
-    """Pids whose program is `codex` itself.
+#: Subcommands that mean "not a session". `app-server` is the important one: it is a
+#: single shared backend serving every thread, and it holds their transcripts open, so
+#: it looks exactly like a client to any join based on open files. Binding it would
+#: name one arbitrary thread after a process that belongs to all of them.
+NOT_A_SESSION = ("app-server", "mcp", "mcp-server", "completion", "exec")
 
-    Not `codex-code-mode-host`, which each client spawns as a helper: matching on the
-    exact basename keeps those out without naming them.
+
+def codex_pids(commands: Dict[int, str]) -> List[int]:
+    """Pids that are a `codex` session client.
+
+    Excludes `codex-code-mode-host`, the per-client helper, by matching the exact
+    basename; and the shared subcommands above by looking at the first argument.
     """
     found = []
     for pid, command in (commands or {}).items():
         parts = command.split()
-        if parts and os.path.basename(parts[0]) == "codex":
-            found.append(pid)
+        if not parts or os.path.basename(parts[0]) != "codex":
+            continue
+        if len(parts) > 1 and parts[1] in NOT_A_SESSION:
+            continue
+        found.append(pid)
     return found
 
 
@@ -230,7 +290,15 @@ class CodexAdapter(Adapter):
         )
         self._tmux_has_session_fn = tmux_has_session_fn or tmux_mod.has_session
         self._commands_fn = commands_fn or procs.command_table
+        #: thread id -> fork parent (or None). Fixed for the life of a thread, and
+        #: each lookup opens a file, so it is read once rather than every tick.
+        self._forks: Dict[str, Optional[str]] = {}
         self._rollouts_fn = rollouts_fn or open_rollouts
+
+    def _fork_parent(self, thread_id: str) -> Optional[str]:
+        if thread_id not in self._forks:
+            self._forks[thread_id] = fork_parent(self.codex_home, thread_id)
+        return self._forks[thread_id]
 
     def available(self) -> bool:
         return _latest_state_db(self.codex_home) is not None
@@ -335,7 +403,11 @@ class CodexAdapter(Adapter):
                     pid=pids.get(thread_id),
                     attach=self._attach_for(thread_id, held),
                     source=self.name,
-                    extra={"session_id": thread_id, "resumable": True},
+                    extra={
+                        "session_id": thread_id,
+                        "resumable": True,
+                        "forked_from_id": self._fork_parent(thread_id),
+                    },
                 )
             )
-        return records, []
+        return collapse_forked_continuations(records), []

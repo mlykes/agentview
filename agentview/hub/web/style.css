@@ -87,6 +87,7 @@ body {
 }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand h1 { font-size: 15px; margin: 0; letter-spacing: -0.01em; font-weight: 650; }
+.hub-identity { color: var(--ink-3); font: 11px/1.2 var(--mono); white-space: nowrap; }
 .brand-mark {
   width: 10px; height: 10px; border-radius: 50%;
   background: var(--accent);
@@ -141,8 +142,29 @@ body.with-terminal .ctx-head { padding: 8px 12px; }
   padding: 2px 8px; border-radius: 999px;
   background: var(--panel); border: 1px solid var(--line);
 }
-.ctx.child { margin: 0 0 0 26px; border-left: 2px solid var(--line); border-radius: 0 8px 8px 0; }
-.children { padding: 10px 12px 12px 0; }
+/* A nested context belongs to the *machine*, not to whichever directory group
+   happened to render last. Both are children of the same card, so without a break
+   the container butts straight up against the final directory's agents and reads as
+   one of its members -- it looks like the devcontainer lives in that directory.
+   The rule closes the directory list, and the caption says whose child this is. */
+.children {
+  margin-top: 12px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.children::before {
+  content: "nested inside this machine";
+  display: block;
+  margin: 0 0 9px 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 650;
+  color: var(--ink-3);
+}
+.ctx.child { margin: 0; border: 1px solid var(--line); border-radius: 8px; }
+.ctx.child + .ctx.child { margin-top: 10px; }
 
 .agent {
   display: grid;

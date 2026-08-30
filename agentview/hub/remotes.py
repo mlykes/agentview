@@ -39,7 +39,9 @@ from agentview.hub.hosts import SshHost
 
 #: Where the collector is unpacked on the remote. Under ~/.agentview so it sits with
 #: the token and overrides rather than scattering files around $HOME.
-REMOTE_CODE_DIR = "~/.agentview/code"
+#: Fallback for a hub that names no instance (a one-off `--once` run). A live hub
+#: always passes its own, so two of them never share a directory.
+REMOTE_CODE_DIR = "~/.agentview/code/default"
 
 #: Long enough for a slow link and a cold Python start, short enough that a wedged
 #: host cannot stall the whole poll loop.
@@ -140,19 +142,26 @@ def package_tar() -> bytes:
     return buf.getvalue()
 
 
-def sync_code(host: str, timeout: float = SSH_TIMEOUT) -> Optional[str]:
+def code_dir(instance: Optional[str] = None) -> str:
+    if not instance:
+        return REMOTE_CODE_DIR
+    from agentview.hub.runtime import deployment_dir
+    return deployment_dir("ssh", instance)
+
+
+def sync_code(host: str, timeout: float = SSH_TIMEOUT, instance: Optional[str] = None) -> Optional[str]:
     """Copy the collector to the remote. Returns an error string, or None."""
     payload = package_tar()
-    command = "mkdir -p {d} && tar -xzf - -C {d}".format(d=REMOTE_CODE_DIR)
+    command = "mkdir -p {d} && tar -xzf - -C {d}".format(d=code_dir(instance))
     code, err = SshHost(host).run_input(command, payload, timeout=timeout)
     if code != 0:
         return err.strip().splitlines()[-1] if err.strip() else "copy failed"
     return None
 
 
-def collect_once(host: str, timeout: float = SSH_TIMEOUT) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def collect_once(host: str, timeout: float = SSH_TIMEOUT, instance: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Run the collector on the remote and return its snapshot."""
-    command = "cd {d} && python3 -m agentview.collector --once".format(d=REMOTE_CODE_DIR)
+    command = "cd {d} && python3 -m agentview.collector --once".format(d=code_dir(instance))
     code, out, err = run(host, command, timeout=timeout)
     if code != 0:
         return None, (err or out).strip().splitlines()[-1] if (err or out).strip() else "collector failed"

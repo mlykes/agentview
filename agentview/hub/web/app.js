@@ -30,6 +30,20 @@
   var totalsEl = document.getElementById("totals");
   var connEl = document.getElementById("conn");
   var connText = document.getElementById("conn-text");
+  var hubIdentityEl = document.getElementById("hub-identity");
+
+  // Which build is this? A hub left running from an old checkout reports missing
+  // agents, and missing agents look exactly like nothing running -- so the answer
+  // has to be on screen, not in the process list.
+  function showHubIdentity(hub) {
+    if (!hub || !hub.profile) return;
+    var git = (hub.branch || "unknown") + "@" + (hub.commit || "unknown");
+    if (hub.dirty) git += "*";
+    var label = hub.profile + " \u00b7 " + git + " \u00b7 :" + hub.port;
+    hubIdentityEl.textContent = label;
+    hubIdentityEl.title = hub.checkout || "";
+    document.title = "agentview " + label;
+  }
 
   function terminalInput(data) {
     // xterm.js answers a secondary device-attributes query with a sequence such as
@@ -388,6 +402,7 @@
   }
 
   function render(view) {
+    showHubIdentity(view.hub);
     renderTotals(view.totals);
     // Rebuilding now would blow away the input the user is typing into.
     if (editing) return;
