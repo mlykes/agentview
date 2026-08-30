@@ -12,12 +12,11 @@ from typing import Dict, List, Optional
 
 from agentview.collector import context as context_mod
 from agentview.collector import tmux
-from agentview.collector.adapters.tmux_adapter import attach_for_session
 from agentview.collector.adapters.base import Adapter
 from agentview.collector.adapters.claude_code import ClaudeCodeAdapter
 from agentview.collector.adapters.codex import CodexAdapter
 from agentview.collector.adapters.heartbeat import HeartbeatAdapter
-from agentview.collector.adapters.tmux_adapter import TmuxAdapter
+from agentview.collector.adapters.tmux_adapter import TmuxAdapter, attach_for_session
 from agentview.model import AgentRecord, ContextRef, Snapshot
 
 #: Fields a lower-priority adapter is allowed to fill in when a higher-priority one

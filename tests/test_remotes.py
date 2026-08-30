@@ -8,9 +8,9 @@ encoded in the login-shell tests below.
 
 from __future__ import annotations
 
+import io
 import json
 import tarfile
-import io
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory

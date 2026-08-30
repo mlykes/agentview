@@ -10,10 +10,10 @@ Stdlib only.
 
 from __future__ import annotations
 
-import os
 import fcntl
 import glob
 import json
+import os
 import shlex
 import shutil
 import sqlite3
@@ -25,7 +25,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from agentview.collector import procs
 from agentview.collector import tmux as tmux_mod
 from agentview.collector.adapters.base import Adapter
-from agentview.model import AgentRecord, AttachSpec, ContextRef, STATUS_BUSY, STATUS_IDLE
+from agentview.model import STATUS_BUSY, STATUS_IDLE, AgentRecord, AttachSpec, ContextRef
 
 HARNESS = "codex"
 HARNESS_LABEL = "Codex"

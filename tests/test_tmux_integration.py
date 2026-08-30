@@ -84,10 +84,10 @@ class TmuxAttachTest(unittest.TestCase):
         self.assertIsNone(tmux.session_for_pid(1, tmux.list_panes()))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
+# Needs a real tmux server, like the classes above. Without the guard this class's
+# setUpClass shells out unconditionally and errors on a host with no tmux -- which is
+# exactly what the dependency-free CI container is.
+@unittest.skipUnless(tmux.available(), "tmux is not installed")
 class AgentviewOwnClientsAreHiddenTest(unittest.TestCase):
     """agentview parks `claude attach` clients in tmux sessions of its own.
 
@@ -103,23 +103,27 @@ class AgentviewOwnClientsAreHiddenTest(unittest.TestCase):
     def setUpClass(cls):
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", cls.BG_SESSION, "sh", "-c", "sleep 30"],
-            capture_output=True, timeout=20,
+            capture_output=True, timeout=20, check=False,
         )
         time.sleep(0.3)
 
     @classmethod
     def tearDownClass(cls):
         subprocess.run(
-            ["tmux", "kill-session", "-t", cls.BG_SESSION], capture_output=True
+            ["tmux", "kill-session", "-t", cls.BG_SESSION], capture_output=True, check=False
         )
 
     def test_the_session_really_exists(self):
         """Otherwise the assertion below would pass for the wrong reason."""
         result = subprocess.run(
-            ["tmux", "has-session", "-t", self.BG_SESSION], capture_output=True
+            ["tmux", "has-session", "-t", self.BG_SESSION], capture_output=True, check=False
         )
         self.assertEqual(result.returncode, 0)
 
     def test_pane_discovery_skips_it(self):
         sessions = [pane.session for pane in tmux.list_panes()]
         self.assertNotIn(self.BG_SESSION, sessions)
+
+
+if __name__ == "__main__":
+    unittest.main()

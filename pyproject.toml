@@ -24,7 +24,8 @@ hub = [
 dev = [
     "agentview[hub]",
     "pytest>=8.0",
-    "ruff>=0.4",
+    # Pinned: an unpinned linter means CI silently changes what it enforces.
+    "ruff==0.16.5",
 ]
 
 [project.scripts]
@@ -36,6 +37,24 @@ include = ["agentview*"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+
+[tool.ruff.lint]
+# Declared explicitly. With no selection ruff enables its entire catalogue, which
+# changes between releases -- so CI enforced a different standard every upgrade and
+# never passed at all.
+#
+# `UP` (pyupgrade) is deliberately absent. It rewrites `Optional[str]` to `str | None`
+# and `List` to `list`, which reads better but is exactly the modernisation this
+# project cannot take: the collector has to run on the oldest interpreter it might be
+# copied onto, and the work server is Python 3.9.2. The 3.9-compatible spelling is a
+# constraint, not an oversight.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes -- real bugs, e.g. the undefined name that started this
+    "I",   # import ordering
+    "B",   # bugbear -- likely mistakes rather than style
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

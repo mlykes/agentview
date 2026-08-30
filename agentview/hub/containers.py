@@ -166,7 +166,8 @@ def rewrite(snapshot: Dict[str, Any], host, cid: str, parent_id: Optional[str]) 
             # does not exist on this side.
             agent["attach"] = {
                 "available": False,
-                "reason": "not attachable from outside the container - only tmux sessions can be reached",
+                "reason": "not attachable from outside the container"
+                          " - only tmux sessions can be reached",
                 "argv": None,
                 "argv_readonly": None,
             }

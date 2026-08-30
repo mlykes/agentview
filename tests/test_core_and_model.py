@@ -139,7 +139,8 @@ class LiveLocationTest(unittest.TestCase):
         pane the user is actually sitting in."""
         rec = record(pid=4242, cwd="/stale", extra={"tmux_session": "work"})
         with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/from-pid"), \
-                mock.patch("agentview.collector.tmux.path_for_session", return_value="/from-pane"), \
+                mock.patch("agentview.collector.tmux.path_for_session",
+                           return_value="/from-pane"), \
                 mock.patch("agentview.collector.core._git_branch", return_value=None):
             refresh_live_locations([rec])
         self.assertEqual(rec.cwd, "/from-pane")
@@ -148,7 +149,8 @@ class LiveLocationTest(unittest.TestCase):
         """Codex changes a thread's logical directory without the long-lived CLI
         process ever chdir'ing, so the process cwd is the wrong answer for it."""
         rec = record(harness="codex", pid=4242, cwd="/the/thread/dir")
-        with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/where/the/cli/started"):
+        with mock.patch("agentview.collector.procs.cwd_for_pid",
+                        return_value="/where/the/cli/started"):
             refresh_live_locations([rec])
         self.assertEqual(rec.cwd, "/the/thread/dir")
 

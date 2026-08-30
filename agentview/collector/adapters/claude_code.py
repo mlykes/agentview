@@ -214,7 +214,9 @@ def bg_attach_argv(
     # want: first open creates the client, later ones join it.
     argv = ["tmux", "new-session", "-A", "-s", session, claude_bin, "attach", job_id]
     quoted = " ".join(
-        shlex.quote(part) for part in ("tmux", "new-session", "-d", "-s", session, claude_bin, "attach", job_id)
+        shlex.quote(part)
+        for part in ("tmux", "new-session", "-d", "-s", session,
+                     claude_bin, "attach", job_id)
     )
     readonly = [
         "sh",

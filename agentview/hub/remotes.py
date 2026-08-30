@@ -149,7 +149,8 @@ def code_dir(instance: Optional[str] = None) -> str:
     return deployment_dir("ssh", instance)
 
 
-def sync_code(host: str, timeout: float = SSH_TIMEOUT, instance: Optional[str] = None) -> Optional[str]:
+def sync_code(host: str, timeout: float = SSH_TIMEOUT,
+              instance: Optional[str] = None) -> Optional[str]:
     """Copy the collector to the remote. Returns an error string, or None."""
     payload = package_tar()
     command = "mkdir -p {d} && tar -xzf - -C {d}".format(d=code_dir(instance))
@@ -159,12 +160,15 @@ def sync_code(host: str, timeout: float = SSH_TIMEOUT, instance: Optional[str] =
     return None
 
 
-def collect_once(host: str, timeout: float = SSH_TIMEOUT, instance: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def collect_once(
+    host: str, timeout: float = SSH_TIMEOUT, instance: Optional[str] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Run the collector on the remote and return its snapshot."""
     command = "cd {d} && python3 -m agentview.collector --once".format(d=code_dir(instance))
     code, out, err = run(host, command, timeout=timeout)
     if code != 0:
-        return None, (err or out).strip().splitlines()[-1] if (err or out).strip() else "collector failed"
+        detail = (err or out).strip()
+        return None, detail.splitlines()[-1] if detail else "collector failed"
     try:
         snapshot = json.loads(out)
     except ValueError:

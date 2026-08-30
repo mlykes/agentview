@@ -15,8 +15,7 @@ from agentview.collector.adapters.codex import (
     collapse_forked_continuations,
     resumed_thread_pids,
 )
-from agentview.model import AgentRecord, ContextRef, STATUS_IDLE
-
+from agentview.model import STATUS_IDLE, AgentRecord, ContextRef
 
 SCHEMA = """
 CREATE TABLE threads (

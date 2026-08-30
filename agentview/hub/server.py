@@ -31,15 +31,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
+from agentview import harnesses, runner
 from agentview.collector import context as context_mod
 from agentview.collector.core import collect
-from agentview import harnesses
-from agentview import runner
-from agentview.hub.ptys import PtyManager
-from agentview.hub.overrides import COLOURS, Overrides
 from agentview.hub import containers as containers_mod
 from agentview.hub import hosts as hosts_mod
 from agentview.hub import remotes as remotes_mod
+from agentview.hub.overrides import COLOURS, Overrides
+from agentview.hub.ptys import PtyManager
 from agentview.hub.registry import Registry
 from agentview.hub.runtime import PROFILE_PORTS, git_identity, instance_id
 
@@ -803,7 +802,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-local", action="store_true", help="do not collect from this machine")
     parser.add_argument("--no-auth", action="store_true", help="disable the token (loopback only)")
-    parser.add_argument("--token", default=None, help="use this token instead of ~/.agentview/token")
+    parser.add_argument("--token", default=None,
+                        help="use this token instead of ~/.agentview/token")
     parser.add_argument("--label", default=None, help="display label for this machine")
     parser.add_argument("--parent", default=None)
     parser.add_argument("--verbose", action="store_true", help="log every HTTP request")
