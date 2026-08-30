@@ -13,11 +13,10 @@ from __future__ import annotations
 import json
 import threading
 import unittest
-from pathlib import Path
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
-
+from pathlib import Path
 from unittest import mock
 
 from agentview import runner

@@ -5,17 +5,18 @@ Stdlib only.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from agentview.collector import context as context_mod
 from agentview.collector import tmux
-from agentview.collector.adapters.tmux_adapter import attach_for_session
 from agentview.collector.adapters.base import Adapter
 from agentview.collector.adapters.claude_code import ClaudeCodeAdapter
+from agentview.collector.adapters.codex import CodexAdapter
 from agentview.collector.adapters.heartbeat import HeartbeatAdapter
-from agentview.collector.adapters.tmux_adapter import TmuxAdapter
+from agentview.collector.adapters.tmux_adapter import TmuxAdapter, attach_for_session
 from agentview.model import AgentRecord, ContextRef, Snapshot
 
 #: Fields a lower-priority adapter is allowed to fill in when a higher-priority one
@@ -29,7 +30,12 @@ def default_adapters(config_dir: Optional[Path] = None) -> List[Adapter]:
     M5 adds the generic tmux/process/heartbeat adapters here; the merge below
     already handles them.
     """
-    return [ClaudeCodeAdapter(config_dir=config_dir), TmuxAdapter(), HeartbeatAdapter()]
+    return [
+        ClaudeCodeAdapter(config_dir=config_dir),
+        CodexAdapter(),
+        TmuxAdapter(),
+        HeartbeatAdapter(),
+    ]
 
 
 def merge(groups: List[List[AgentRecord]]) -> List[AgentRecord]:
@@ -79,6 +85,7 @@ def collect(
     agents = merge(groups)
     agents = drop_shadowed_tmux_records(agents)
     apply_attach(agents)
+    refresh_live_locations(agents)
 
     return Snapshot(
         context=ctx,
@@ -86,6 +93,47 @@ def collect(
         collected_at=time.time(),
         warnings=warnings,
     )
+
+
+def _git_branch(cwd: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    branch = result.stdout.strip() if result.returncode == 0 else ""
+    return branch or None
+
+
+def refresh_live_locations(records: List[AgentRecord]) -> None:
+    """Replace launch-time cwd with where the agent actually is now.
+
+    A registry records the directory a session *started* in. Agents move, and a row
+    naming the wrong directory is worse than one naming none: the HUD groups by
+    working directory, so a moved agent is filed under the wrong repo.
+
+    Runs after merging, so a rich adapter's stale value cannot win over the live one,
+    and the branch is re-read alongside the directory -- they change together.
+    """
+    from agentview.collector.procs import cwd_for_pid
+
+    for record in records:
+        # Codex is the exception, and deliberately so: it changes a thread's logical
+        # directory without the long-lived CLI process ever chdir'ing, so its own
+        # per-thread record is more accurate than either the process or its pane.
+        if record.harness == "codex":
+            continue
+        live_cwd = cwd_for_pid(record.pid) if record.pid else None
+        session = record.extra.get("tmux_session")
+        if session:
+            # tmux knows the pane the user is actually in, which beats the pid when
+            # an adapter reported a supervisor rather than the TUI itself.
+            live_cwd = tmux.path_for_session(str(session)) or live_cwd
+        if live_cwd and live_cwd != record.cwd:
+            record.cwd = live_cwd
+            record.git_branch = _git_branch(live_cwd)
 
 
 def drop_shadowed_tmux_records(records: List[AgentRecord]) -> List[AgentRecord]:

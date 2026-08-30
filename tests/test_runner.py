@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import unittest
-
 import os
 import types
+import unittest
 from unittest import mock
 
 from agentview import runner
