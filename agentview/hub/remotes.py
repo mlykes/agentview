@@ -36,10 +36,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agentview.hub.hosts import SshHost
+from agentview.hub.locks import file_lock
 
 #: Where the collector is unpacked on the remote. Under ~/.agentview so it sits with
 #: the token and overrides rather than scattering files around $HOME.
 REMOTE_CODE_DIR = "~/.agentview/code"
+
+
+def code_dir(instance: Optional[str] = None) -> str:
+    return REMOTE_CODE_DIR + ("/" + instance if instance else "")
 
 #: Long enough for a slow link and a cold Python start, short enough that a wedged
 #: host cannot stall the whole poll loop.
@@ -89,11 +94,16 @@ def load_remotes(extra: Optional[List[str]] = None) -> List[str]:
 def save_remotes(hosts: List[str]) -> None:
     path = config_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        with tmp.open("w") as fh:
-            json.dump(sorted(set(hosts)), fh, indent=2)
-        os.replace(str(tmp), str(path))
+        with file_lock(path.with_name(path.name + ".lock")):
+            # A second hub may have added a different host since this process read
+            # the file. Merge under the process lock rather than replacing it.
+            current = load_remotes()
+            combined = sorted(set(current + hosts))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name("{}.{}.tmp".format(path.name, os.getpid()))
+            with tmp.open("w") as fh:
+                json.dump(combined, fh, indent=2)
+            os.replace(str(tmp), str(path))
     except OSError:
         pass
 
@@ -140,19 +150,23 @@ def package_tar() -> bytes:
     return buf.getvalue()
 
 
-def sync_code(host: str, timeout: float = SSH_TIMEOUT) -> Optional[str]:
+def sync_code(
+    host: str, timeout: float = SSH_TIMEOUT, code_dir: str = REMOTE_CODE_DIR
+) -> Optional[str]:
     """Copy the collector to the remote. Returns an error string, or None."""
     payload = package_tar()
-    command = "mkdir -p {d} && tar -xzf - -C {d}".format(d=REMOTE_CODE_DIR)
+    command = "mkdir -p {d} && tar -xzf - -C {d}".format(d=code_dir)
     code, err = SshHost(host).run_input(command, payload, timeout=timeout)
     if code != 0:
         return err.strip().splitlines()[-1] if err.strip() else "copy failed"
     return None
 
 
-def collect_once(host: str, timeout: float = SSH_TIMEOUT) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def collect_once(
+    host: str, timeout: float = SSH_TIMEOUT, code_dir: str = REMOTE_CODE_DIR
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Run the collector on the remote and return its snapshot."""
-    command = "cd {d} && python3 -m agentview.collector --once".format(d=REMOTE_CODE_DIR)
+    command = "cd {d} && python3 -m agentview.collector --once".format(d=code_dir)
     code, out, err = run(host, command, timeout=timeout)
     if code != 0:
         return None, (err or out).strip().splitlines()[-1] if (err or out).strip() else "collector failed"

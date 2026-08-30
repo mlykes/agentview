@@ -33,6 +33,10 @@ from typing import Any, Dict, List, Optional, Tuple
 #: image, including the ones that run as a non-root user with a read-only home.
 CODE_DIR = "/tmp/.agentview-code"
 
+
+def code_dir(instance: Optional[str] = None) -> str:
+    return CODE_DIR + ("-" + instance if instance else "")
+
 #: Containers are enumerated far less often than agents are polled: the set changes
 #: rarely, and each probe costs an exec (or an ssh plus an exec).
 DEFAULT_INTERVAL = 20.0
@@ -76,11 +80,13 @@ def python_in(host, cid: str) -> Optional[str]:
     return path[0].strip() if path and path[0].strip() else None
 
 
-def sync_collector(host, cid: str, payload: bytes) -> Optional[str]:
+def sync_collector(
+    host, cid: str, payload: bytes, code_dir: str = CODE_DIR
+) -> Optional[str]:
     """Copy the collector into the container. Returns an error string, or None."""
     command = "docker exec -i {c} sh -c {inner}".format(
         c=shlex.quote(cid),
-        inner=shlex.quote("mkdir -p {d} && tar -xzf - -C {d}".format(d=CODE_DIR)),
+        inner=shlex.quote("mkdir -p {d} && tar -xzf - -C {d}".format(d=code_dir)),
     )
     code, err = host.run_input(command, payload)
     if code != 0:
@@ -88,11 +94,11 @@ def sync_collector(host, cid: str, payload: bytes) -> Optional[str]:
     return None
 
 
-def collect_once(host, cid: str, python: str = "python3"):
+def collect_once(host, cid: str, python: str = "python3", code_dir: str = CODE_DIR):
     command = "docker exec {c} sh -c {inner}".format(
         c=shlex.quote(cid),
         inner=shlex.quote("cd {d} && {p} -m agentview.collector --once".format(
-            d=CODE_DIR, p=python
+            d=code_dir, p=python
         )),
     )
     code, out, err = host.run(command)

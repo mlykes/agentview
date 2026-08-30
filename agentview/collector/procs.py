@@ -11,7 +11,35 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 from typing import Dict, List, Optional
+
+
+def cwd_for_pid(pid: int) -> Optional[str]:
+    """Current working directory of a live process, on Linux and macOS.
+
+    Harness registries commonly retain the directory where a session started. Slash
+    commands such as ``/cd`` change the live process instead, so the process is the
+    authoritative source for a running agent.
+    """
+    if pid <= 0:
+        return None
+    proc_link = Path("/proc") / str(pid) / "cwd"
+    try:
+        return os.readlink(str(proc_link))
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n/"):
+            return line[1:]
+    return None
 
 
 def process_table() -> Dict[int, str]:

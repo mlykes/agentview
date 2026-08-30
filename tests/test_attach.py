@@ -6,7 +6,7 @@ import os
 import time
 import unittest
 
-from agentview.hub.ptys import PtyManager, PtySession
+from agentview.hub.ptys import PtyManager, PtySession, terminal_env
 from agentview.hub.registry import Registry
 from agentview.hub.server import HubState
 
@@ -107,6 +107,15 @@ class ReadOnlyPolicyTest(unittest.TestCase):
         argv, error = state.resolve_attach("h1:x:only")
         self.assertIsNone(error)
         self.assertEqual(argv, ["tmux", "attach", "-t", "s"])
+
+
+class TerminalEnvironmentTest(unittest.TestCase):
+    def test_dumb_parent_terminal_is_replaced_with_browser_capabilities(self):
+        env = terminal_env({"TERM": "dumb", "TMUX": "parent", "TMUX_PANE": "%1"})
+        self.assertEqual(env["TERM"], "xterm-256color")
+        self.assertEqual(env["COLORTERM"], "truecolor")
+        self.assertNotIn("TMUX", env)
+        self.assertNotIn("TMUX_PANE", env)
 
 
 class PtySessionTest(unittest.TestCase):
