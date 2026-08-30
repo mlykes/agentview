@@ -28,11 +28,11 @@ def available() -> bool:
     return shutil.which("tmux") is not None
 
 
-#: tmux sessions agentview parks its own `claude attach` clients in. These are
-#: plumbing, not agents: the pane holds a *client* onto a background session whose
-#: real process lives elsewhere with no controlling terminal. Left visible, every
-#: background agent you opened would show up a second time as its own entry.
+#: tmux sessions agentview parks its own Claude and Codex clients in. These are
+#: plumbing, not agents. Left visible, every session opened from the HUD would show
+#: up a second time as a generic tmux record.
 AGENTVIEW_BG_PREFIX = "agentview_bg_"
+AGENTVIEW_CODEX_PREFIX = "agentview_codex_"
 
 
 def list_panes() -> List[Pane]:
@@ -61,7 +61,7 @@ def list_panes() -> List[Pane]:
             pid = int(parts[1])
         except ValueError:
             continue
-        if parts[0].startswith(AGENTVIEW_BG_PREFIX):
+        if parts[0].startswith((AGENTVIEW_BG_PREFIX, AGENTVIEW_CODEX_PREFIX)):
             continue
         panes.append(Pane(session=parts[0], pid=pid, command=parts[2], path=parts[3]))
     return panes
@@ -99,3 +99,18 @@ def has_session(name: str) -> bool:
         ).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def path_for_session(name: str) -> Optional[str]:
+    """Live cwd of a session's active pane, including agentview's internal panes."""
+    if not available():
+        return None
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", name, "#{pane_current_path}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    path = result.stdout.strip() if result.returncode == 0 else ""
+    return path or None

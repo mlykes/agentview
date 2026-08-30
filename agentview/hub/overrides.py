@@ -30,6 +30,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agentview.hub.locks import file_lock
+
 #: Long enough for a sentence fragment, short enough to stay on one row.
 MAX_NAME = 64
 
@@ -80,6 +82,20 @@ class Overrides:
         self.path = Path(path) if path else default_path()
         self._lock = threading.Lock()
         self._entries: Dict[str, Dict[str, str]] = self._load()
+        self._stamp = self._mtime()
+
+    def _mtime(self):
+        try:
+            stat = self.path.stat()
+            return (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+
+    def _reload_if_changed(self) -> None:
+        stamp = self._mtime()
+        if stamp != self._stamp:
+            self._entries = self._load()
+            self._stamp = stamp
 
     # -- persistence ------------------------------------------------------
 
@@ -127,10 +143,13 @@ class Overrides:
         # would drop every override on the next start.
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".json.tmp")
+            tmp = self.path.with_name("{}.{}.{}.tmp".format(
+                self.path.name, os.getpid(), threading.get_ident()
+            ))
             with tmp.open("w") as fh:
                 json.dump(self._entries, fh, indent=2, sort_keys=True)
             os.replace(str(tmp), str(self.path))
+            self._stamp = self._mtime()
         except OSError:
             pass  # an override that fails to persist is not worth failing a request over
 
@@ -140,28 +159,32 @@ class Overrides:
         if not agent_id:
             return {}
         with self._lock:
+            self._reload_if_changed()
             return dict(self._entries.get(agent_id) or {})
 
     def all(self) -> Dict[str, Dict[str, str]]:
         with self._lock:
+            self._reload_if_changed()
             return {k: dict(v) for k, v in self._entries.items()}
 
     # -- writes -----------------------------------------------------------
 
     def _set(self, agent_id: str, field: str, value: Optional[str]) -> Optional[str]:
         with self._lock:
-            entry = dict(self._entries.get(agent_id) or {})
-            if value is None:
-                entry.pop(field, None)
-            else:
-                entry[field] = value
-            if entry:
-                self._entries[agent_id] = entry
-            else:
-                # Drop the id entirely once nothing is overridden, so the file does
-                # not accumulate empty records for every agent ever renamed.
-                self._entries.pop(agent_id, None)
-            self._save()
+            with file_lock(self.path.with_name(self.path.name + ".lock")):
+                # Reload inside the process lock: another hub may have changed an
+                # unrelated agent since our last read.
+                self._entries = self._load()
+                entry = dict(self._entries.get(agent_id) or {})
+                if value is None:
+                    entry.pop(field, None)
+                else:
+                    entry[field] = value
+                if entry:
+                    self._entries[agent_id] = entry
+                else:
+                    self._entries.pop(agent_id, None)
+                self._save()
         return value
 
     def set_name(self, agent_id: str, name: Optional[str]) -> Optional[str]:

@@ -32,6 +32,24 @@ IDLE_TIMEOUT = 300.0
 READ_CHUNK = 65536
 
 
+def terminal_env(environ=None):
+    """Environment for a child connected to agentview's xterm.js terminal.
+
+    The hub is often started by a daemon, nohup, or another agent whose TERM is
+    ``dumb``.  Keeping that value makes tmux reject the browser PTY with "terminal
+    does not support clear".  The frontend really is xterm-compatible, so describe
+    the terminal we provide rather than inheriting the hub launcher's terminal.
+    """
+    env = dict(os.environ if environ is None else environ)
+    env["TERM"] = "xterm-256color"
+    env.setdefault("COLORTERM", "truecolor")
+    # A nested tmux client must not inherit the server's own session context, or it
+    # refuses with "sessions should be nested with care".
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    return env
+
+
 class PtySession:
     def __init__(self, key: str, argv: List[str], cols: int = 120, rows: int = 32) -> None:
         self.key = key
@@ -61,11 +79,7 @@ class PtySession:
             # Child. Nothing here may raise back into the parent, so any failure
             # exits the forked process directly.
             try:
-                env = dict(os.environ)
-                env.setdefault("TERM", "xterm-256color")
-                # A nested tmux client must not inherit the server's own session
-                # context, or it refuses with "sessions should be nested with care".
-                env.pop("TMUX", None)
+                env = terminal_env()
                 os.execvpe(self.argv[0], self.argv, env)
             except BaseException:
                 os._exit(127)

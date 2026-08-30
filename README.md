@@ -62,6 +62,58 @@ python3 -m agentview.collector --hub http://<hub-host>:7788 --token <token> \
 (The collector keeps its own `-m agentview.collector` entry point: it is the piece you
 copy to a locked-down machine on its own, and it must run with nothing else present.)
 
+## Stable and preview hubs
+
+A clean main checkout and a feature checkout can run the full topology together:
+
+```bash
+cd /Users/mlykes/Developer/agentview-main
+git pull --ff-only
+./bin/agentview hub --profile stable       # port 7788
+
+cd /Users/mlykes/Developer/agentview
+./bin/agentview hub --profile preview      # port 7789
+```
+
+When starting a hub from inside Codex or another agent, detach it so the harness does
+not treat the long-running server as one of the session's background shell commands:
+
+```bash
+./bin/agentview hub --profile preview --daemon
+```
+
+`--daemon` uses POSIX process detachment implemented by AgentView itself—not macOS
+`launchctl` or Linux `systemd`—so the same command works on macOS, Linux, and inside
+an already-running Linux container. PID and log files live under
+`~/.agentview/run/<instance-id>.{pid,log}`. When AgentView is the container's primary
+process, leave it in the foreground and let the container runtime supervise it.
+
+`stable` is the backward-compatible default. `--port` overrides either profile's
+port, and the profile, checkout, branch, short commit, dirty marker and effective
+port appear in the authenticated page and startup banner. Always use the launcher
+inside the checkout being previewed: a global symlink targeting the main checkout
+will run main's code regardless of the selected port.
+
+Both hubs intentionally read and control the same agents and share
+`~/.agentview/names.json`, `~/.agentview/remotes.json`, and the auth token. Thus an
+attach, stop, rename, colour change, or launch in either writable UI affects shared
+state. Full-topology previews also approximately double polling traffic.
+
+`remotes.json` accepts SSH hosts and local Docker/Podman containers, for example:
+
+```json
+{
+  "ssh": ["devbox", {"host": "buildbox"}],
+  "containers": ["api-dev", {"name": "worker-dev", "engine": "podman"}]
+}
+```
+
+Each hub deploys its collector into an isolated cache:
+`~/.agentview/code/<instance-id>` over SSH and
+`/tmp/.agentview-code-<instance-id>` in a container. Old `~/.agentview/code` contents
+and `/tmp/.agentview-code-*` instances are not deleted automatically; stale or legacy
+caches are safe to remove after their hubs have stopped.
+
 ## Status
 
 **M1–M3 work**: collector, hub + overview UI, and terminal attach.
@@ -75,6 +127,8 @@ server-side.
 
 Supported today:
 - **Claude Code** — rich adapter reading its session registry
+- **Codex** — interactive threads from the same local store as `codex resume --all`;
+  opening one runs `codex resume <thread-id>`
 - **Any harness running in tmux** — recognised by process name from a table you can
   extend in `~/.agentview/harnesses.json`, no code change
 - **Anything else** — write a heartbeat file to `~/.agentview/agents/*.json`
@@ -102,6 +156,7 @@ Agents reach their terminal by one of two routes, picked per session:
 |---|---|
 | running inside tmux | `tmux attach -t <session>` — the terminal it already draws |
 | Claude Code background agent | `claude attach <job id>` — a fresh client onto the running session |
+| Codex resumable session | `codex resume <thread id>` — opens the saved thread in a client |
 | started in a bare terminal | not attachable |
 
 Background agents have no controlling terminal at all (`ps` reports tty `??`), so there

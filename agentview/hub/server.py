@@ -35,9 +35,12 @@ from agentview.collector import context as context_mod
 from agentview.collector.core import collect
 from agentview import harnesses
 from agentview import runner
-from agentview.hub.ptys import PtyManager
+from agentview.hub.locks import file_lock
 from agentview.hub.overrides import COLOURS, Overrides
+from agentview.hub.ptys import PtyManager
 from agentview.hub.registry import Registry
+from agentview.hub.runtime import PROFILE_PORTS, checkout_path, git_identity, instance_id
+from agentview.hub.topology import RemoteStore, TopologyPoller
 
 WEB_ROOT = Path(__file__).parent / "web"
 TOKEN_PATH = Path.home() / ".agentview" / "token"
@@ -48,21 +51,27 @@ def load_or_create_token() -> str:
 
     Loopback binding is the primary control; this is the second layer.
     """
+    token = secrets.token_urlsafe(24)
     try:
-        if TOKEN_PATH.exists():
+        with file_lock(TOKEN_PATH.with_name(TOKEN_PATH.name + ".lock")):
+            if TOKEN_PATH.exists():
+                existing = TOKEN_PATH.read_text().strip()
+                if existing:
+                    return existing
+            TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(TOKEN_PATH), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(token)
+            return token
+    except OSError:
+        # A creator may have won just before a filesystem error was reported.
+        try:
             existing = TOKEN_PATH.read_text().strip()
             if existing:
                 return existing
-    except OSError:
-        pass
-    token = secrets.token_urlsafe(24)
-    try:
-        TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_PATH.write_text(token)
-        os.chmod(str(TOKEN_PATH), 0o600)
-    except OSError:
-        pass  # ephemeral token is still better than none
-    return token
+        except OSError:
+            pass
+        return token  # ephemeral token is still better than none
 
 
 def available_harnesses():
@@ -99,6 +108,7 @@ class HubState:
         allow_input: bool = True,
         can_launch: bool = True,
         overrides: Optional[Overrides] = None,
+        hub_info: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.registry = registry
         #: agentview's own label and colour for each agent. A read-only hub does
@@ -115,6 +125,7 @@ class HubState:
         #: Editing a row mutates hub-side state, so a read-only hub refuses it for
         #: the same reason it refuses launching.
         self.can_edit = allow_input and overrides is not None
+        self.hub_info = dict(hub_info or {})
 
     def resolve_attach(self, agent_id: str):
         """(argv, error) for an agent, enforcing what this hub can actually reach.
@@ -246,7 +257,9 @@ class Handler(BaseHTTPRequestHandler):
                                     "colours": list(COLOURS)})
 
         if path == "/v1/view":
-            return self._json(200, self.state.registry.view())
+            view = self.state.registry.view()
+            view["hub"] = self.state.hub_info
+            return self._json(200, view)
         if path == "/v1/agents":
             return self._json(
                 200,
@@ -460,7 +473,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
         blocks = [
-            self._data_block("bootstrap", self.state.registry.view()),
+            self._data_block(
+                "bootstrap", dict(self.state.registry.view(), hub=self.state.hub_info)
+            ),
             # Capabilities go in the first frame too. Learning them from the async
             # /v1/harnesses fetch left the per-row controls missing until the next
             # poll, which reads as "the feature isn't there" rather than "not yet".
@@ -531,7 +546,10 @@ def local_collector_loop(registry: Registry, interval: float, label, parent) -> 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m agentview.hub")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback)")
-    parser.add_argument("--port", type=int, default=7788)
+    parser.add_argument("--profile", choices=sorted(PROFILE_PORTS), default="stable",
+                        help="hub profile (stable: 7788, preview: 7789)")
+    parser.add_argument("--port", type=int, default=None,
+                        help="bind port (overrides the profile default)")
     parser.add_argument("--interval", type=float, default=3.0, help="local collector tick")
     parser.add_argument("--no-local", action="store_true", help="do not collect from this machine")
     parser.add_argument("--no-auth", action="store_true", help="disable the token (loopback only)")
@@ -539,6 +557,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label", default=None, help="display label for this machine")
     parser.add_argument("--parent", default=None)
     parser.add_argument("--verbose", action="store_true", help="log every HTTP request")
+    parser.add_argument(
+        "--daemon", action="store_true",
+        help="detach from this terminal (macOS/Linux; logs under ~/.agentview/run)",
+    )
     parser.add_argument(
         "--read-only", action="store_true",
         help="never forward keystrokes to an agent's terminal",
@@ -555,8 +577,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_paths(instance: str):
+    root = Path(os.environ.get("AGENTVIEW_HOME") or (Path.home() / ".agentview")) / "run"
+    return root / (instance + ".pid"), root / (instance + ".log")
+
+
+def daemonize(instance: str) -> bool:
+    """Detach portably on POSIX. Return True only in the serving grandchild."""
+    if os.name != "posix" or not hasattr(os, "fork"):
+        raise RuntimeError("--daemon requires a POSIX host (macOS or Linux)")
+    pid_path, log_path = run_paths(instance)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    first = os.fork()
+    if first:
+        print("agentview hub starting in background")
+        print("  pid file: {}".format(pid_path))
+        print("  log:      {}".format(log_path))
+        return False
+    os.setsid()
+    second = os.fork()
+    if second:
+        os._exit(0)
+    os.chdir("/")
+    os.umask(0o027)
+    null_fd = os.open(os.devnull, os.O_RDONLY)
+    log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.dup2(null_fd, 0)
+    os.dup2(log_fd, 1)
+    os.dup2(log_fd, 2)
+    os.close(null_fd)
+    os.close(log_fd)
+    return True
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.port is None:
+        args.port = PROFILE_PORTS[args.profile]
 
     if args.no_auth and args.host not in ("127.0.0.1", "localhost", "::1"):
         print(
@@ -565,6 +622,17 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    identity = git_identity()
+    hub_info = dict(identity, profile=args.profile, port=args.port)
+    hub_info["instance_id"] = instance_id(args.profile, args.port)
+    if args.daemon:
+        try:
+            if not daemonize(hub_info["instance_id"]):
+                return 0
+        except (OSError, RuntimeError) as exc:
+            print("cannot start hub in background: {}".format(exc), file=sys.stderr)
+            return 1
 
     token = None if args.no_auth else (args.token or load_or_create_token())
     overrides = Overrides()
@@ -579,8 +647,13 @@ def main(argv=None) -> int:
         allow_input=not args.read_only,
         can_launch=not args.no_launch,
         overrides=overrides,
+        hub_info=hub_info,
     )
     Handler.verbose = args.verbose
+
+    topology = TopologyPoller(registry, RemoteStore(), checkout_path(),
+                              hub_info["instance_id"], args.interval)
+    threading.Thread(target=topology.run, daemon=True).start()
 
     if not args.no_local:
         thread = threading.Thread(
@@ -596,13 +669,22 @@ def main(argv=None) -> int:
         print("cannot bind {}:{}: {}".format(args.host, args.port, exc), file=sys.stderr)
         return 1
 
+    daemon_pid_path = None
+    if args.daemon:
+        daemon_pid_path, _ = run_paths(hub_info["instance_id"])
+        daemon_pid_path.write_text(str(os.getpid()) + "\n")
+
     url = "http://{}:{}/".format(
         "127.0.0.1" if args.host in ("0.0.0.0", "127.0.0.1") else args.host, args.port
     )
     if token:
         url += "?t=" + token
 
-    print("agentview hub listening on {}:{}".format(args.host, args.port))
+    dirty = " dirty" if identity["dirty"] else " clean"
+    print("agentview {} hub listening on {}:{}".format(args.profile, args.host, args.port))
+    print("  checkout: {}".format(identity["checkout"]))
+    print("  git:      {} @ {} ({})".format(identity["branch"], identity["commit"], dirty.strip()))
+    print("  instance: {}".format(hub_info["instance_id"]))
     print("")
     print("  open:  {}".format(url))
     print("")
@@ -618,6 +700,12 @@ def main(argv=None) -> int:
         return 0
     finally:
         httpd.server_close()
+        if daemon_pid_path:
+            try:
+                if daemon_pid_path.read_text().strip() == str(os.getpid()):
+                    daemon_pid_path.unlink()
+            except OSError:
+                pass
     return 0
 
 

@@ -6,7 +6,9 @@ import json
 import unittest
 
 from agentview.collector.adapters.base import Adapter
-from agentview.collector.core import collect, merge
+from unittest import mock
+
+from agentview.collector.core import collect, merge, refresh_live_locations
 from agentview.model import AgentRecord, AttachSpec, ContextRef
 
 
@@ -79,6 +81,33 @@ class CollectTest(unittest.TestCase):
         payload = json.loads(json.dumps(snapshot.to_dict()))
         self.assertEqual(payload["agents"][0]["name"], "survivor")
         self.assertEqual(payload["context"]["id"], "c")
+
+
+class LiveLocationTest(unittest.TestCase):
+    def test_codex_thread_cwd_beats_its_shared_process_cwd(self):
+        agent = record(harness="codex", cwd="/thread-cd", git_branch="feature", pid=123)
+        with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/process-launch"):
+            refresh_live_locations([agent])
+        self.assertEqual(agent.cwd, "/thread-cd")
+        self.assertEqual(agent.git_branch, "feature")
+
+    def test_process_cd_replaces_stale_adapter_cwd_and_branch(self):
+        agent = record(cwd="/started-here", git_branch="old", pid=123)
+        with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/now-here"), \
+             mock.patch("agentview.collector.core._git_branch", return_value="feature/live"):
+            refresh_live_locations([agent])
+        self.assertEqual(agent.cwd, "/now-here")
+        self.assertEqual(agent.git_branch, "feature/live")
+
+    def test_tmux_path_wins_for_supervised_agents(self):
+        agent = record(cwd="/old", pid=123, extra={"tmux_session": "agentview_x"})
+        with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/supervisor"), \
+             mock.patch("agentview.collector.core.tmux.path_for_session",
+                        return_value="/interactive"), \
+             mock.patch("agentview.collector.core._git_branch", return_value=None):
+            refresh_live_locations([agent])
+        self.assertEqual(agent.cwd, "/interactive")
+        self.assertIsNone(agent.git_branch)
 
 
 if __name__ == "__main__":

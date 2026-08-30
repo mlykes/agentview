@@ -5,6 +5,7 @@ Stdlib only.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -14,6 +15,7 @@ from agentview.collector import tmux
 from agentview.collector.adapters.tmux_adapter import attach_for_session
 from agentview.collector.adapters.base import Adapter
 from agentview.collector.adapters.claude_code import ClaudeCodeAdapter
+from agentview.collector.adapters.codex import CodexAdapter
 from agentview.collector.adapters.heartbeat import HeartbeatAdapter
 from agentview.collector.adapters.tmux_adapter import TmuxAdapter
 from agentview.model import AgentRecord, ContextRef, Snapshot
@@ -29,7 +31,12 @@ def default_adapters(config_dir: Optional[Path] = None) -> List[Adapter]:
     M5 adds the generic tmux/process/heartbeat adapters here; the merge below
     already handles them.
     """
-    return [ClaudeCodeAdapter(config_dir=config_dir), TmuxAdapter(), HeartbeatAdapter()]
+    return [
+        ClaudeCodeAdapter(config_dir=config_dir),
+        CodexAdapter(),
+        TmuxAdapter(),
+        HeartbeatAdapter(),
+    ]
 
 
 def merge(groups: List[List[AgentRecord]]) -> List[AgentRecord]:
@@ -79,6 +86,7 @@ def collect(
     agents = merge(groups)
     agents = drop_shadowed_tmux_records(agents)
     apply_attach(agents)
+    refresh_live_locations(agents)
 
     return Snapshot(
         context=ctx,
@@ -86,6 +94,44 @@ def collect(
         collected_at=time.time(),
         warnings=warnings,
     )
+
+
+def _git_branch(cwd: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    branch = result.stdout.strip() if result.returncode == 0 else ""
+    return branch or None
+
+
+def refresh_live_locations(records: List[AgentRecord]) -> None:
+    """Replace launch-time cwd metadata with the running terminal/process cwd.
+
+    This runs after merging so a rich adapter cannot overwrite the live value from
+    tmux. It also covers sessions whose dedicated adapter has no PID (notably Codex
+    resumptions parked in agentview's own tmux session).
+    """
+    from agentview.collector.procs import cwd_for_pid
+
+    for record in records:
+        # Codex changes a thread's logical cwd without chdir'ing the long-lived CLI
+        # process. Its per-thread database is updated immediately and is therefore
+        # more precise than either the shared process cwd or its containing pane.
+        if record.harness == "codex":
+            continue
+        live_cwd = cwd_for_pid(record.pid) if record.pid else None
+        session = record.extra.get("tmux_session")
+        if session:
+            # tmux knows the interactive pane selected by the user and is more
+            # precise when an adapter PID is a supervisor rather than the TUI.
+            live_cwd = tmux.path_for_session(str(session)) or live_cwd
+        if live_cwd and live_cwd != record.cwd:
+            record.cwd = live_cwd
+            record.git_branch = _git_branch(live_cwd)
 
 
 def drop_shadowed_tmux_records(records: List[AgentRecord]) -> List[AgentRecord]:

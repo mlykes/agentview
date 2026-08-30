@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -95,7 +96,7 @@ def unique_session_name(name: str) -> str:
     base = session_name(name)
     if not tmux.has_session(base):
         return base
-    return "{}-{}".format(base, int(time.time()) % 100000)
+    return "{}-{}-{}".format(base, int(time.time()) % 100000, secrets.token_hex(3))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -158,15 +159,18 @@ def launch_detached(command: List[str], name: str) -> str:
     if not tmux.available():
         raise RuntimeError("tmux is not installed, and it is what makes attach possible")
 
-    session = unique_session_name(name)
-    create = (
-        ["tmux", "new-session", "-d", "-s", session, "-n", slugify(name)]
-        + sanitize(command)
-    )
-    result = subprocess.run(create, capture_output=True, text=True, timeout=20)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "tmux refused to start the session")
-    return session
+    # Checking then creating is inherently racy across two writable hubs. tmux is
+    # the arbiter; retry a bounded number of collision-resistant names.
+    for _ in range(5):
+        session = unique_session_name(name)
+        create = (["tmux", "new-session", "-d", "-s", session, "-n", slugify(name)]
+                  + sanitize(command))
+        result = subprocess.run(create, capture_output=True, text=True, timeout=20)
+        if result.returncode == 0:
+            return session
+        if "duplicate session" not in (result.stderr or "").lower():
+            raise RuntimeError(result.stderr.strip() or "tmux refused to start the session")
+    raise RuntimeError("tmux session name collided repeatedly; please retry")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
