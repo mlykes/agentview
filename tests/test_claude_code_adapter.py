@@ -23,6 +23,8 @@ from agentview.collector.adapters.claude_code import (
 from agentview.model import (
     STATUS_BLOCKED,
     STATUS_BUSY,
+    STATUS_DONE,
+    STATUS_FAILED,
     STATUS_IDLE,
     STATUS_UNKNOWN,
     ContextRef,
@@ -327,14 +329,33 @@ class ConfigDirTest(unittest.TestCase):
 
 
 class StatusResolutionTest(unittest.TestCase):
+    """The two axes disagree routinely, and the job is usually the better witness.
+
+    ``sessions/<pid>.json:status`` describes the process; ``jobs/*/state.json:state``
+    describes the work. A background agent mid-turn writes `working` in its job while
+    its session still reads `idle`, because nothing is streaming to a terminal.
+    """
+
     CASES = [
         # A session can be live-busy while its last recorded job state is stale
         # "blocked"; the live signal must win.
         ("busy", "blocked", STATUS_BUSY),
         ("idle", "blocked", STATUS_BLOCKED),
-        ("idle", "active", STATUS_IDLE),
+        # The regression these cases exist for: `working` is what Claude Code
+        # actually writes, and reading it as idle made a working agent, a finished
+        # one and a failed one all indistinguishable from one waiting for you.
+        ("idle", "working", STATUS_BUSY),
+        ("idle", "done", STATUS_DONE),
+        ("idle", "failed", STATUS_FAILED),
+        # "active" was a guess that never matched anything on disk. Kept as an alias
+        # in case an older Claude Code writes it.
+        ("idle", "active", STATUS_BUSY),
+        # Blocked outranks the work state: an agent is still nominally working while
+        # it waits on a human, and waiting is the thing you need to see.
+        ("idle", "blocked", STATUS_BLOCKED),
         ("busy", None, STATUS_BUSY),
-        (None, "active", STATUS_BUSY),
+        (None, "working", STATUS_BUSY),
+        ("idle", None, STATUS_IDLE),
         (None, None, STATUS_UNKNOWN),
     ]
 
@@ -342,6 +363,13 @@ class StatusResolutionTest(unittest.TestCase):
         for session_status, job_state, expected in self.CASES:
             with self.subTest(session=session_status, job=job_state):
                 self.assertEqual(_resolve_status(session_status, job_state), expected)
+
+    def test_a_finished_agent_is_not_reported_as_stuck(self):
+        """The stuck detector only looks at busy agents, and terminal work must
+        never re-enter that set -- a job that finished an hour ago has not moved
+        since, which is exactly the shape of a wedged one."""
+        for state in ("done", "failed"):
+            self.assertNotEqual(_resolve_status("idle", state), STATUS_BUSY)
 
 
 if __name__ == "__main__":

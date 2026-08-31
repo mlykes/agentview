@@ -18,7 +18,13 @@ from typing import Any, Dict, List, Optional
 STATUS_BUSY = "busy"
 STATUS_IDLE = "idle"
 STATUS_BLOCKED = "blocked"  # waiting on a human
+STATUS_DONE = "done"        # finished its turn; the process is still around
+STATUS_FAILED = "failed"    # stopped because something broke
 STATUS_UNKNOWN = "unknown"
+
+#: Work has stopped and will not resume on its own. The stuck detector ignores
+#: these, and so should anything that measures how long an agent has been quiet.
+TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED)
 
 CONTEXT_HOST = "host"
 CONTEXT_CONTAINER = "container"
