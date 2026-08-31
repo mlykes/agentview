@@ -156,8 +156,52 @@ class LiveLocationTest(unittest.TestCase):
 
     def test_an_agent_with_no_pid_is_left_alone(self):
         rec = record(pid=None, cwd="/unchanged")
-        refresh_live_locations([rec])
+        with mock.patch("agentview.collector.core._git_branch", return_value=None):
+            refresh_live_locations([rec])
         self.assertEqual(rec.cwd, "/unchanged")
+
+
+class LiveBranchTest(unittest.TestCase):
+    """A branch belongs to the directory, not to the moment the session started."""
+
+    def test_a_branch_switched_underneath_a_stationary_agent_is_re_read(self):
+        """The regression: an agent that never moved kept advertising a branch that
+        had since been deleted, because the branch was only re-read when the cwd
+        changed -- and it never did."""
+        rec = record(pid=4242, cwd="/repo", git_branch="m1-collector")
+        with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/repo"), \
+                mock.patch("agentview.collector.core._git_branch", return_value="main"):
+            refresh_live_locations([rec])
+        self.assertEqual(rec.cwd, "/repo")
+        self.assertEqual(rec.git_branch, "main")
+
+    def test_codex_keeps_its_directory_but_not_its_stale_branch(self):
+        """Codex is exempt from the cwd correction, not from the branch one."""
+        rec = record(harness="codex", pid=4242, cwd="/repo", git_branch="m1-collector")
+        with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/elsewhere"), \
+                mock.patch("agentview.collector.core._git_branch", return_value="main"):
+            refresh_live_locations([rec])
+        self.assertEqual(rec.cwd, "/repo")
+        self.assertEqual(rec.git_branch, "main")
+
+    def test_a_directory_that_is_no_longer_a_repo_loses_its_branch(self):
+        rec = record(pid=4242, cwd="/not-a-repo", git_branch="main")
+        with mock.patch("agentview.collector.procs.cwd_for_pid", return_value="/not-a-repo"), \
+                mock.patch("agentview.collector.core._git_branch", return_value=None):
+            refresh_live_locations([rec])
+        self.assertIsNone(rec.git_branch)
+
+    def test_one_git_call_per_distinct_directory(self):
+        """Every tick re-reads the branch, so agents sharing a directory must not
+        each pay for their own subprocess."""
+        records = [record(pid=1, cwd="/repo"), record(pid=2, cwd="/repo"),
+                   record(pid=3, cwd="/other")]
+        with mock.patch("agentview.collector.procs.cwd_for_pid", side_effect=lambda p: None), \
+                mock.patch("agentview.collector.core._git_branch",
+                           return_value="main") as branch:
+            refresh_live_locations(records)
+        self.assertEqual(sorted(call[0][0] for call in branch.call_args_list),
+                         ["/other", "/repo"])
 
 
 if __name__ == "__main__":

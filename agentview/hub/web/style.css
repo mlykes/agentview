@@ -13,6 +13,8 @@
   --busy: #1a9c5b;
   --idle: #97a2b1;
   --blocked: #d08512;
+  --done: #6f7ce0;
+  --failed: #c9483c;
   --stuck: #d1443f;
   --accent: #3760d4;
   --badge-bg: #e4eaf7;
@@ -48,6 +50,8 @@
     --busy: #2fd07c;
     --idle: #6e7c8f;
     --blocked: #e0a03c;
+    --done: #8e99ee;
+    --failed: #e56b5d;
     --stuck: #ff6b63;
     --accent: #6f9bff;
     --badge-bg: #1d2740;
@@ -211,6 +215,10 @@ body.with-terminal .dir-head { padding: 7px 12px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); align-self: center; }
 .dot.busy { background: var(--busy); animation: pulse 1.8s ease-in-out infinite; }
 .dot.blocked { background: var(--blocked); }
+/* Work that has stopped: hollow rather than filled, so a finished agent reads as
+   settled at a glance instead of competing with the ones still running. */
+.dot.done { background: transparent; box-shadow: inset 0 0 0 2px var(--done); }
+.dot.failed { background: var(--failed); }
 .dot.stuck { background: var(--stuck); animation: none; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
 @media (prefers-reduced-motion: reduce) { .dot.busy { animation: none } }
@@ -286,6 +294,8 @@ body.with-terminal .dir-head { padding: 7px 12px; }
 .status-word { text-transform: lowercase; }
 .status-word.busy { color: var(--busy); }
 .status-word.blocked { color: var(--blocked); }
+.status-word.done { color: var(--done); }
+.status-word.failed { color: var(--failed); font-weight: 620; }
 .stuck-tag { color: var(--stuck); font-weight: 620; }
 .detail {
   grid-column: 2 / -1;

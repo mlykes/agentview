@@ -11,9 +11,15 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from agentview.model import STATUS_BLOCKED, STATUS_BUSY, Snapshot
+from agentview.model import (
+    STATUS_BLOCKED,
+    STATUS_BUSY,
+    STATUS_DONE,
+    STATUS_FAILED,
+    Snapshot,
+)
 
-_DOT = {STATUS_BUSY: "*", STATUS_BLOCKED: "?"}
+_DOT = {STATUS_BUSY: "*", STATUS_BLOCKED: "?", STATUS_DONE: "v", STATUS_FAILED: "x"}
 
 
 def _age(ts: Optional[float], now: float) -> str:

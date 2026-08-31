@@ -28,10 +28,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agentview.collector import tmux as tmux_mod
 from agentview.collector.adapters.base import Adapter
-from agentview.collector.procs import pid_matches, process_table
+from agentview.collector.procs import command_table, pid_matches, process_table
 from agentview.model import (
     STATUS_BLOCKED,
     STATUS_BUSY,
+    STATUS_DONE,
+    STATUS_FAILED,
     STATUS_IDLE,
     STATUS_UNKNOWN,
     AgentRecord,
@@ -228,22 +230,39 @@ def bg_attach_argv(
     return argv, readonly
 
 
+#: What `jobs/*/state.json:state` actually contains. "active" is not among them --
+#: it was a guess, and it never matched, which is how "working" came to be read as
+#: idle. Kept as an alias in case an older Claude Code writes it.
+_JOB_WORKING = ("working", "active")
+
 def _resolve_status(session_status: Optional[str], job_state: Optional[str]) -> str:
     """Merge the two status axes Claude Code exposes.
 
-    ``sessions/<pid>.json:status`` is the live busy/idle signal. ``jobs/*/state.json:
-    state`` says whether the job is blocked on a human. A session can be 'busy' while
-    its last recorded job state is 'blocked', so the live signal wins; 'blocked' only
-    surfaces once the session has actually gone quiet.
+    ``sessions/<pid>.json:status`` is the live busy/idle signal for the *process*.
+    ``jobs/*/state.json:state`` is the state of the *work*, and the two disagree
+    routinely: a background agent mid-turn records `working` in its job while its
+    session still reads `idle`, because nothing is streaming to a terminal. The job
+    is the better witness for everything except a session that says outright it is
+    busy, so the live signal still wins where it speaks.
+
+    Getting this wrong is not cosmetic. Reading the job state as idle made a working
+    agent, a finished one and a *failed* one indistinguishable from one sitting
+    quietly waiting for you -- the single question the HUD exists to answer.
     """
     if session_status == "busy":
         return STATUS_BUSY
+    if job_state == "failed":
+        return STATUS_FAILED
+    # 'blocked' outranks the work state: an agent waiting on a human is the thing
+    # you most need to see, and it is still nominally "working" while it waits.
     if job_state == "blocked":
         return STATUS_BLOCKED
+    if job_state in _JOB_WORKING:
+        return STATUS_BUSY
+    if job_state == "done":
+        return STATUS_DONE
     if session_status == "idle":
         return STATUS_IDLE
-    if job_state == "active":
-        return STATUS_BUSY
     return STATUS_UNKNOWN
 
 
@@ -255,6 +274,7 @@ class ClaudeCodeAdapter(Adapter):
         self,
         config_dir: Optional[Path] = None,
         process_table_fn: Optional[Callable[[], Dict[int, str]]] = None,
+        command_table_fn: Optional[Callable[[], Dict[int, str]]] = None,
         which_fn: Optional[Callable[[str], Optional[str]]] = None,
         tmux_available_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
@@ -262,6 +282,9 @@ class ClaudeCodeAdapter(Adapter):
         #: Injectable so tests can pin liveness instead of depending on whatever
         #: happens to be running on the machine at the time.
         self._process_table_fn = process_table_fn or process_table
+        #: argv, consulted only when the executable name does not carry the
+        #: harness -- which on Linux is every background agent.
+        self._command_table_fn = command_table_fn or command_table
         #: Same reasoning for attach: whether `claude` and `tmux` exist is a property
         #: of the box, and tests should not depend on it.
         self._which = which_fn or shutil.which
@@ -366,6 +389,7 @@ class ClaudeCodeAdapter(Adapter):
             return records, ["claude-code: cannot list sessions dir: {}".format(exc)]
 
         table = self._process_table_fn()
+        argv_table = self._command_table_fn()
 
         for path in session_files:
             data = _load_json(path)
@@ -380,7 +404,14 @@ class ClaudeCodeAdapter(Adapter):
 
             # The ghost check. Without this the HUD happily reports agents that
             # exited days ago, which is worse than showing nothing.
-            if not pid_matches(pid, "claude", table):
+            if not pid_matches(pid, "claude", table, argv_table):
+                continue
+
+            # A pre-warmed spare is a process Claude Code parked for the *next*
+            # agent, not one you started. It has no intent and no transcript, so it
+            # surfaces as a row named after its own job id. Claiming one rewrites
+            # this file, so it appears the moment it becomes a real agent.
+            if data.get("spare") is True:
                 continue
 
             job_state: Dict[str, Any] = {}

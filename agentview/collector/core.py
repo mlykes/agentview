@@ -114,26 +114,39 @@ def refresh_live_locations(records: List[AgentRecord]) -> None:
     naming the wrong directory is worse than one naming none: the HUD groups by
     working directory, so a moved agent is filed under the wrong repo.
 
-    Runs after merging, so a rich adapter's stale value cannot win over the live one,
-    and the branch is re-read alongside the directory -- they change together.
+    Runs after merging, so a rich adapter's stale value cannot win over the live one.
+
+    The branch is re-read every tick rather than only when the directory changes.
+    A checkout the agent never left can still be moved to another branch underneath
+    it, and the stale label then survives indefinitely -- a session sitting in a
+    directory that is now on `main` kept advertising a branch that had been deleted.
+    Branch is a property of the directory now, not of when the session started.
     """
     from agentview.collector.procs import cwd_for_pid
 
+    branches: Dict[str, Optional[str]] = {}
     for record in records:
-        # Codex is the exception, and deliberately so: it changes a thread's logical
-        # directory without the long-lived CLI process ever chdir'ing, so its own
-        # per-thread record is more accurate than either the process or its pane.
-        if record.harness == "codex":
+        # Codex is the exception for *cwd*, and deliberately so: it changes a
+        # thread's logical directory without the long-lived CLI process ever
+        # chdir'ing, so its own per-thread record beats the process or its pane.
+        # Its branch is not exempt -- that is the directory's property, not the
+        # thread's.
+        if record.harness != "codex":
+            live_cwd = cwd_for_pid(record.pid) if record.pid else None
+            session = record.extra.get("tmux_session")
+            if session:
+                # tmux knows the pane the user is actually in, which beats the pid
+                # when an adapter reported a supervisor rather than the TUI itself.
+                live_cwd = tmux.path_for_session(str(session)) or live_cwd
+            if live_cwd and live_cwd != record.cwd:
+                record.cwd = live_cwd
+        if not record.cwd:
             continue
-        live_cwd = cwd_for_pid(record.pid) if record.pid else None
-        session = record.extra.get("tmux_session")
-        if session:
-            # tmux knows the pane the user is actually in, which beats the pid when
-            # an adapter reported a supervisor rather than the TUI itself.
-            live_cwd = tmux.path_for_session(str(session)) or live_cwd
-        if live_cwd and live_cwd != record.cwd:
-            record.cwd = live_cwd
-            record.git_branch = _git_branch(live_cwd)
+        # Agents cluster in a handful of directories, so one `git` call per distinct
+        # path rather than one per record.
+        if record.cwd not in branches:
+            branches[record.cwd] = _git_branch(record.cwd)
+        record.git_branch = branches[record.cwd]
 
 
 def drop_shadowed_tmux_records(records: List[AgentRecord]) -> List[AgentRecord]:
