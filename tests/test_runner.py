@@ -120,3 +120,41 @@ class LaunchCommandTest(unittest.TestCase):
     def test_it_is_still_a_tmux_new_session(self):
         _, argv = self._launch({})
         self.assertEqual(argv[:4], ["tmux", "new-session", "-d", "-s"])
+
+
+class ConcurrentLaunchTest(unittest.TestCase):
+    """Two hubs can launch at the same moment. Asking tmux whether a name is free
+    and then taking it are two steps, and the answer can go stale in between."""
+
+    def test_a_duplicate_name_is_retried_rather_than_raised(self):
+        attempts = []
+
+        def fake_run(argv, **kwargs):
+            attempts.append(argv[argv.index("-s") + 1])
+            if len(attempts) == 1:
+                return mock.Mock(returncode=1, stderr="duplicate session: agentview_x")
+            return mock.Mock(returncode=0, stderr="")
+
+        with mock.patch("agentview.runner.tmux.available", return_value=True), \
+                mock.patch("agentview.runner.tmux.has_session", return_value=True), \
+                mock.patch("agentview.runner.subprocess.run", side_effect=fake_run):
+            session = runner.launch_detached(["sh"], "x")
+
+        self.assertEqual(len(attempts), 2)
+        self.assertNotEqual(attempts[0], attempts[1])  # a fresh name, not the same one
+        self.assertEqual(session, attempts[1])
+
+    def test_any_other_tmux_failure_is_surfaced_immediately(self):
+        """Retrying a real error would turn one clear failure into five slow ones."""
+        with mock.patch("agentview.runner.tmux.available", return_value=True), \
+                mock.patch("agentview.runner.tmux.has_session", return_value=False), \
+                mock.patch("agentview.runner.subprocess.run",
+                           return_value=mock.Mock(returncode=1, stderr="no server running")):
+            with self.assertRaises(RuntimeError) as caught:
+                runner.launch_detached(["sh"], "x")
+        self.assertIn("no server", str(caught.exception))
+
+    def test_names_do_not_collide_when_generated_in_the_same_second(self):
+        with mock.patch("agentview.runner.tmux.has_session", return_value=True):
+            names = {runner.unique_session_name("x") for _ in range(50)}
+        self.assertEqual(len(names), 50)
