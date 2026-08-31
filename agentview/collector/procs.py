@@ -84,11 +84,26 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def pid_matches(pid: int, expect: str, table: Optional[Dict[int, str]] = None) -> bool:
+def pid_matches(
+    pid: int,
+    expect: str,
+    table: Optional[Dict[int, str]] = None,
+    argv_table: Optional[Dict[int, str]] = None,
+) -> bool:
     """Alive *and* actually the program we expect.
 
     Guards against PID reuse: a recycled pid would otherwise resurrect a dead agent
     as whatever process inherited its number.
+
+    The executable name alone is not enough, and the gap is platform-shaped. macOS
+    `ps -o comm=` prints the full path, so a background agent running
+    ``~/.local/share/claude/versions/2.1.251`` still reads as "claude". Linux prints
+    the basename -- ``2.1.251`` -- which carries no trace of the harness, so every
+    background agent on a Linux host looked dead and was silently dropped. The
+    install path is the evidence that survives on both, so fall back to argv[0].
+
+    Only argv[0] is consulted, never the whole command line: `grep claude` and
+    `vim ~/.claude/settings.json` would both match the latter.
     """
     if not pid_alive(pid):
         return False
@@ -102,7 +117,12 @@ def pid_matches(pid: int, expect: str, table: Optional[Dict[int, str]] = None) -
         # means this pid is gone -- or belongs to a process we cannot see, which
         # is not our agent either way.
         return False
-    return expect.lower() in comm.lower()
+    if expect.lower() in comm.lower():
+        return True
+    argv = (argv_table or {}).get(pid)
+    if argv:
+        return expect.lower() in argv.split(" ", 1)[0].lower()
+    return False
 
 
 def parent_map() -> Dict[int, int]:

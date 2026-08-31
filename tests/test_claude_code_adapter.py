@@ -31,11 +31,26 @@ from agentview.model import (
 FIXTURES = Path(__file__).parent / "fixtures" / "claude"
 
 # 1002 is deliberately absent -> a ghost. 1004 is alive but is not Claude Code.
+#: 1006 carries the shape Linux reports for a background agent: `ps -o comm=` gives
+#: only the basename of the version-named binary, so nothing in it says "claude".
 FAKE_TABLE = {
     1001: "claude bg-spare",
     1003: "claude",
     1004: "python3",
     1005: "claude",
+    1006: "2.1.251",
+    1007: "claude bg-spare",
+}
+
+#: argv, which is where the install path survives on both platforms.
+FAKE_ARGV = {
+    1001: "claude bg-spare --bg-spare /tmp/spare.sock",
+    1003: "claude",
+    1004: "python3 -m http.server",
+    1005: "claude",
+    1006: ("/home/demo/.local/share/claude/versions/2.1.251 "
+           "--session-id aaaaaaaa-0000-0000-0000-000000000006 --agent claude"),
+    1007: "claude bg-spare --bg-spare /tmp/spare.sock",
 }
 
 #: Whether `claude` and `tmux` exist is a property of the box the tests run on, so
@@ -55,6 +70,7 @@ class ClaudeCodeAdapterTest(unittest.TestCase):
         self.adapter = ClaudeCodeAdapter(
             config_dir=FIXTURES,
             process_table_fn=lambda: dict(FAKE_TABLE),
+            command_table_fn=lambda: dict(FAKE_ARGV),
             which_fn=lambda name: FAKE_CLAUDE if name == "claude" else None,
             tmux_available_fn=lambda: True,
         )
@@ -82,6 +98,19 @@ class ClaudeCodeAdapterTest(unittest.TestCase):
     def test_excludes_recycled_pid(self):
         """pid 1004 is alive but belongs to python3, not Claude Code."""
         self.assertNotIn("pid-recycled", self.by_name)
+
+    def test_a_linux_background_agent_is_not_mistaken_for_a_ghost(self):
+        """The regression: Linux reports only the basename of the version-named
+        binary a background agent execs, so `comm` reads "2.1.251" and every
+        background agent on a Linux host was dropped. The install path in argv is
+        what identifies it."""
+        self.assertIn("linux-bg-agent", self.by_name)
+        self.assertEqual(self.by_name["linux-bg-agent"].pid, 1006)
+
+    def test_a_pre_warmed_spare_is_not_an_agent(self):
+        """Claude Code parks spares for the *next* agent. They have no intent, so
+        they surface named after their own job id -- noise, not sessions."""
+        self.assertNotIn("1007-unclaimed", self.by_name)
 
     def test_blocked_job_reports_blocked(self):
         agent = self.by_name["waiting-on-me"]
@@ -149,6 +178,7 @@ class BackgroundAttachTest(unittest.TestCase):
         return ClaudeCodeAdapter(
             config_dir=FIXTURES,
             process_table_fn=lambda: dict(FAKE_TABLE),
+            command_table_fn=lambda: dict(FAKE_ARGV),
             which_fn=which,
             tmux_available_fn=lambda: tmux_available,
         )
@@ -196,6 +226,7 @@ class SessionColourTest(unittest.TestCase):
         self.adapter = ClaudeCodeAdapter(
             config_dir=FIXTURES,
             process_table_fn=lambda: dict(FAKE_TABLE),
+            command_table_fn=lambda: dict(FAKE_ARGV),
             which_fn=lambda name: FAKE_CLAUDE if name == "claude" else None,
             tmux_available_fn=lambda: True,
         )
